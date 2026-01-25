@@ -303,9 +303,6 @@ Output:
       |
       v
   ASSISTANT: The directory contains...
-      |
-      v
-  STOP: end_turn
 ```
 
 ## Advanced: Internal Structure

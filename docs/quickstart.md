@@ -64,9 +64,6 @@ asyncio.run(main())
       |
       v
   ASSISTANT: Hello! I'm Claude, an AI assistant...
-      |
-      v
-  STOP: end_turn
 ```
 
 ## Understanding the DAG
@@ -155,9 +152,6 @@ asyncio.run(main())
       |
       v
   ASSISTANT: 23 × 47 = 1081
-      |
-      v
-  STOP: end_turn
 ```
 
 ## Using Built-in Tools
