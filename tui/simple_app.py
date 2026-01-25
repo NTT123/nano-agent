@@ -65,7 +65,7 @@ from nano_agent.tools import (
     WriteTool,
 )
 
-from .cancellation import CancellationToken
+from nano_agent.cancellation import CancellationToken
 from .display import (
     format_assistant_message,
     format_error_message,
