@@ -68,9 +68,9 @@ asyncio.run(main())
 ## Installation
 
 ```bash
-git clone https://github.com/NTT123/nano_agent.git
-cd nano_agent
-uv pip install -e .
+git clone https://github.com/NTT123/nano-agent.git
+cd nano-agent
+uv sync
 ```
 
 ## Documentation

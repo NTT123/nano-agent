@@ -37,9 +37,9 @@ dag = dag.tool_result(...)      # Record result in DAG
 
 ```bash
 # Install from source (for development)
-git clone https://github.com/NTT123/nano_agent.git
-cd nano_agent
-uv pip install -e .
+git clone https://github.com/NTT123/nano-agent.git
+cd nano-agent
+uv sync
 ```
 
 **Note:** With `uv`, the package is automatically installed when you run examples with `uv run`. No need to manually install!
