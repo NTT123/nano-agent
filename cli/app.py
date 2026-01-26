@@ -46,6 +46,7 @@ MIN_TERMINAL_HEIGHT = 10
 from nano_agent import (
     DAG,
     ClaudeCodeAPI,
+    DummyAPI,
     GeminiAPI,
     TextContent,
     ToolResultContent,
@@ -114,7 +115,8 @@ class SimpleTerminalApp:
 
     # soft_wrap=True: Let terminal handle line wrapping naturally
     console: Console = field(default_factory=lambda: Console(soft_wrap=True))
-    api: ClaudeCodeAPI | GeminiAPI | None = None
+    api: ClaudeCodeAPI | GeminiAPI | DummyAPI | None = None
+    use_dummy: bool = False
     use_gemini: bool = False
     gemini_model: str = "gemini-3-pro-preview"
     thinking_level: str = "low"
@@ -184,12 +186,14 @@ class SimpleTerminalApp:
         self.console.print()
 
     async def initialize_api(self) -> bool:
-        """Initialize the API client (ClaudeCodeAPI or GeminiAPI).
+        """Initialize the API client (ClaudeCodeAPI, GeminiAPI, or DummyAPI).
 
         Returns:
             True if initialization successful, False otherwise.
         """
-        if self.use_gemini:
+        if self.use_dummy:
+            return await self._initialize_dummy_api()
+        elif self.use_gemini:
             return await self._initialize_gemini_api()
         else:
             return await self._initialize_claude_api()
@@ -239,6 +243,27 @@ class SimpleTerminalApp:
                 )
             )
             return False
+
+    async def _initialize_dummy_api(self) -> bool:
+        """Initialize Dummy API provider for testing."""
+        self.print_history(format_system_message("Initializing Dummy API for testing..."))
+
+        self.api = DummyAPI(
+            model="dummy-model-v1",
+            thinking_probability=0.3,
+            tool_call_probability=0.5,
+            max_tool_calls=2,
+        )
+        model = self.api.model
+        self.dag = DAG().system(build_system_prompt(model)).tools(*self.tools)
+        self.print_history(
+            format_system_message(
+                f"Dummy API initialized ({model})\n"
+                "This is a test provider that generates random responses."
+            )
+        )
+        self.print_blank()
+        return True
 
     async def get_user_input(self) -> str | None:
         """Get user input using prompt_toolkit.
@@ -582,6 +607,11 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="nano-cli")
     parser.add_argument(
+        "--dummy",
+        action="store_true",
+        help="Use dummy API provider for testing (no credentials needed)",
+    )
+    parser.add_argument(
         "--gemini",
         metavar="MODEL",
         nargs="?",
@@ -602,6 +632,7 @@ def main() -> None:
     args = parser.parse_args()
 
     app = SimpleTerminalApp(
+        use_dummy=args.dummy,
         use_gemini=args.gemini is not None,
         gemini_model=args.gemini or "gemini-3-pro-preview",
         thinking_level=args.thinking_level,

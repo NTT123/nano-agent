@@ -24,6 +24,7 @@ from .capture_claude_code_auth import (
 # API clients
 from .claude_api import ClaudeAPI, Response, Usage
 from .claude_code_api import ClaudeCodeAPI
+from .dummy_api import DummyAPI
 
 # Core graph primitives
 from .dag import DAG, Node
@@ -102,6 +103,7 @@ __all__ = [
     "DAG",
     "ClaudeAPI",
     "ClaudeCodeAPI",
+    "DummyAPI",
     "GeminiAPI",
     "OpenAIAPI",
     "Response",
