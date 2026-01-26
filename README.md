@@ -15,7 +15,7 @@ dag = dag.assistant(response.content) # New DAG
 
 **Conversation Graph** - Everything is a node in a directed acyclic graph: system prompts, messages, tool calls, results. Branch and merge for parallel tool execution.
 
-**Built-in Tools** - `BashTool`, `ReadTool`, `WriteTool`, `EditTool`, `GlobTool`, `SearchTool`, `PythonTool`.
+**Built-in Tools** - `BashTool`, `ReadTool`, `WriteTool`, `EditTool`, `GlobTool`, `GrepTool`, `PythonTool`.
 
 **Visualization** - Print any DAG to see the conversation flow, or export to HTML:
 
@@ -73,15 +73,22 @@ cd nano-agent
 uv sync
 ```
 
-## nano-tui
+## nano-cli
 
-<img src="screenshot.png" alt="nano-tui screenshot" width="600">
+<img src="screenshot.png" alt="nano-cli screenshot" width="600">
 
 Simple terminal UI for debugging:
 
 ```bash
 uv run nano-agent-capture-auth
-uv run nano-tui
+uv run nano-cli
+```
+
+Or install as a tool:
+
+```bash
+uv tool install .
+nano-cli
 ```
 
 ## License

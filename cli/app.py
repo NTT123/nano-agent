@@ -32,7 +32,7 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.styles import Style
-from rich.console import Console, RenderableType
+from rich.console import Console, Group, RenderableType
 from rich.json import JSON
 from rich.live import Live
 from rich.panel import Panel
@@ -46,6 +46,7 @@ MIN_TERMINAL_HEIGHT = 10
 from nano_agent import (
     DAG,
     ClaudeCodeAPI,
+    DummyAPI,
     GeminiAPI,
     TextContent,
     ToolResultContent,
@@ -56,9 +57,9 @@ from nano_agent.tools import (
     EditConfirmTool,
     EditTool,
     GlobTool,
+    GrepTool,
     PythonTool,
     ReadTool,
-    SearchTool,
     TodoWriteTool,
     Tool,
     WebFetchTool,
@@ -72,6 +73,7 @@ from .display import (
     format_system_message,
     format_thinking_message,
     format_thinking_separator,
+    format_token_count,
     format_tool_call,
     format_tool_result,
     format_user_message,
@@ -114,7 +116,8 @@ class SimpleTerminalApp:
 
     # soft_wrap=True: Let terminal handle line wrapping naturally
     console: Console = field(default_factory=lambda: Console(soft_wrap=True))
-    api: ClaudeCodeAPI | GeminiAPI | None = None
+    api: ClaudeCodeAPI | GeminiAPI | DummyAPI | None = None
+    use_dummy: bool = False
     use_gemini: bool = False
     gemini_model: str = "gemini-3-pro-preview"
     thinking_level: str = "low"
@@ -136,7 +139,7 @@ class SimpleTerminalApp:
                 EditTool(),
                 EditConfirmTool(),
                 GlobTool(),
-                SearchTool(),
+                GrepTool(),
                 TodoWriteTool(),
                 WebFetchTool(),
                 PythonTool(),
@@ -184,12 +187,14 @@ class SimpleTerminalApp:
         self.console.print()
 
     async def initialize_api(self) -> bool:
-        """Initialize the API client (ClaudeCodeAPI or GeminiAPI).
+        """Initialize the API client (ClaudeCodeAPI, GeminiAPI, or DummyAPI).
 
         Returns:
             True if initialization successful, False otherwise.
         """
-        if self.use_gemini:
+        if self.use_dummy:
+            return await self._initialize_dummy_api()
+        elif self.use_gemini:
             return await self._initialize_gemini_api()
         else:
             return await self._initialize_claude_api()
@@ -240,6 +245,27 @@ class SimpleTerminalApp:
             )
             return False
 
+    async def _initialize_dummy_api(self) -> bool:
+        """Initialize Dummy API provider for testing."""
+        self.print_history(format_system_message("Initializing Dummy API for testing..."))
+
+        self.api = DummyAPI(
+            model="dummy-model-v1",
+            thinking_probability=0.3,
+            tool_call_probability=0.5,
+            max_tool_calls=2,
+        )
+        model = self.api.model
+        self.dag = DAG().system(build_system_prompt(model)).tools(*self.tools)
+        self.print_history(
+            format_system_message(
+                f"Dummy API initialized ({model})\n"
+                "This is a test provider that generates random responses."
+            )
+        )
+        self.print_blank()
+        return True
+
     async def get_user_input(self) -> str | None:
         """Get user input using prompt_toolkit.
 
@@ -260,7 +286,7 @@ class SimpleTerminalApp:
                 event.current_buffer.insert_text("\n")
 
             # Use FileHistory for persistent history across sessions
-            history_path = Path.home() / ".nano-tui-history"
+            history_path = Path.home() / ".nano-cli-history"
             self.session = PromptSession(
                 history=FileHistory(str(history_path)),
                 key_bindings=bindings,
@@ -477,13 +503,34 @@ Input:
                     self.print_history(format_thinking_message(thinking.thinking))
                     has_thinking = True
 
-            # Display text content
+            # Display text content with token count
             text_content = response.get_text()
             if text_content and text_content.strip():
                 # Add separator if there was thinking content
                 if has_thinking:
                     self.print_history(format_thinking_separator())
-                self.print_history(format_assistant_message(text_content))
+                # Display assistant message and token count together
+                self.print_history(
+                    Group(
+                        format_assistant_message(text_content),
+                        format_token_count(
+                            input_tokens=response.usage.input_tokens,
+                            output_tokens=response.usage.output_tokens,
+                            cache_creation_tokens=response.usage.cache_creation_input_tokens,
+                            cache_read_tokens=response.usage.cache_read_input_tokens,
+                        ),
+                    )
+                )
+            else:
+                # If no text content, just show token count
+                self.print_history(
+                    format_token_count(
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        cache_creation_tokens=response.usage.cache_creation_input_tokens,
+                        cache_read_tokens=response.usage.cache_read_input_tokens,
+                    )
+                )
 
             # Handle tool calls
             tool_calls = response.get_tool_use()
@@ -536,7 +583,7 @@ Input:
         await self.wait_for_valid_terminal_size()
 
         # Print header
-        self.print_history(Text("nano-agent Simple TUI", style="bold cyan"))
+        self.print_history(Text("nano-cli", style="bold cyan"))
         self.print_history(
             Text(
                 "Type your message. /help for commands. Ctrl+C to cancel. Ctrl+D to exit.",
@@ -577,10 +624,15 @@ Input:
 
 
 def main() -> None:
-    """Entry point for the simple TUI application."""
+    """Entry point for the TUI application."""
     import argparse
 
-    parser = argparse.ArgumentParser(description="nano-agent TUI")
+    parser = argparse.ArgumentParser(description="nano-cli")
+    parser.add_argument(
+        "--dummy",
+        action="store_true",
+        help="Use dummy API provider for testing (no credentials needed)",
+    )
     parser.add_argument(
         "--gemini",
         metavar="MODEL",
@@ -602,6 +654,7 @@ def main() -> None:
     args = parser.parse_args()
 
     app = SimpleTerminalApp(
+        use_dummy=args.dummy,
         use_gemini=args.gemini is not None,
         gemini_model=args.gemini or "gemini-3-pro-preview",
         thinking_level=args.thinking_level,

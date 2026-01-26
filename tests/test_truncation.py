@@ -10,7 +10,7 @@ from nano_agent import (
     GlobTool,
     PythonTool,
     ReadTool,
-    SearchTool,
+    GrepTool,
     TruncatedOutput,
     TruncationConfig,
     WebFetchTool,
@@ -245,8 +245,8 @@ class TestToolTruncationConfig:
         assert config is None  # Uses _DEFAULT_TRUNCATION_CONFIG
 
     def test_searchtool_uses_default(self) -> None:
-        """Test SearchTool uses default truncation config."""
-        tool = SearchTool()
+        """Test GrepTool uses default truncation config."""
+        tool = GrepTool()
         config = tool._truncation_config
         assert config is None  # Uses _DEFAULT_TRUNCATION_CONFIG
 

@@ -24,6 +24,7 @@ from .capture_claude_code_auth import (
 # API clients
 from .claude_api import ClaudeAPI, Response, Usage
 from .claude_code_api import ClaudeCodeAPI
+from .dummy_api import DummyAPI
 
 # Core graph primitives
 from .dag import DAG, Node
@@ -69,8 +70,8 @@ from .tools import (
     QuestionOption,
     ReadInput,
     ReadTool,
-    SearchInput,
-    SearchTool,
+    GrepInput,
+    GrepTool,
     StatInput,
     StatTool,
     Todo,
@@ -102,6 +103,7 @@ __all__ = [
     "DAG",
     "ClaudeAPI",
     "ClaudeCodeAPI",
+    "DummyAPI",
     "GeminiAPI",
     "OpenAIAPI",
     "Response",
@@ -143,8 +145,8 @@ __all__ = [
     "BashInput",
     "GlobTool",
     "GlobInput",
-    "SearchTool",
-    "SearchInput",
+    "GrepTool",
+    "GrepInput",
     "ReadTool",
     "ReadInput",
     "StatTool",

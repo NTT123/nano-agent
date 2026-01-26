@@ -431,8 +431,8 @@ class StatInput:
 
 
 @dataclass
-class SearchInput:
-    """Input for SearchTool.
+class GrepInput:
+    """Input for GrepTool.
 
     Note: The original API uses -B, -A, -C, -n, -i parameter names which are not
     valid Python identifiers. This dataclass uses Python-friendly names that map
@@ -1053,10 +1053,10 @@ Note: Requires 'fd' to be installed (brew install fd)."""
 
 
 @dataclass
-class SearchTool(Tool):
+class GrepTool(Tool):
     """A powerful search tool built on ripgrep."""
 
-    name: str = "Search"
+    name: str = "Grep"
     description: str = """A powerful search tool built on ripgrep.
 
 Usage:
@@ -1066,31 +1066,31 @@ Usage:
 
 Examples:
   # Find files containing a pattern (default: files_with_matches)
-  SearchInput(pattern="async def", path="src/")
+  GrepInput(pattern="async def", path="src/")
 
   # Show matching lines with line numbers
-  SearchInput(pattern="class.*Tool", path="src/", output_mode="content")
+  GrepInput(pattern="class.*Tool", path="src/", output_mode="content")
 
   # Count matches per file
-  SearchInput(pattern="TODO", output_mode="count")
+  GrepInput(pattern="TODO", output_mode="count")
 
   # Case-insensitive search with glob filter
-  SearchInput(pattern="error", glob="*.py", case_insensitive=True)
+  GrepInput(pattern="error", glob="*.py", case_insensitive=True)
 
   # Show context lines around matches
-  SearchInput(pattern="def main", output_mode="content", context=2)
+  GrepInput(pattern="def main", output_mode="content", context=2)
 
   # Limit results with pagination
-  SearchInput(pattern="import", head_limit=10, offset=5)"""
+  GrepInput(pattern="import", head_limit=10, offset=5)"""
 
-    async def __call__(self, input: SearchInput) -> TextContent:
+    async def __call__(self, input: GrepInput) -> TextContent:
         """Execute grep search using ripgrep."""
         # Check if ripgrep is available
         if shutil.which("rg") is None:
             return TextContent(
                 text=(
                     "Error: 'rg' (ripgrep) command not found.\n\n"
-                    "SearchTool requires 'ripgrep' to be installed.\n\n"
+                    "GrepTool requires 'ripgrep' to be installed.\n\n"
                     "Installation instructions:\n"
                     "  macOS:   brew install ripgrep\n"
                     "  Ubuntu:  apt install ripgrep\n"
@@ -2405,7 +2405,7 @@ Note: Requires 'uv' to be installed (pip install uv or brew install uv)."""
 DEFAULT_TOOLS: list[Tool] = [
     BashTool(),
     GlobTool(),
-    SearchTool(),
+    GrepTool(),
     ReadTool(),
     StatTool(),
     EditTool(),

@@ -9,7 +9,7 @@ from nano_agent.tools import (
     InputSchemaDict,
     PythonTool,
     ReadTool,
-    SearchTool,
+    GrepTool,
     StatTool,
     TodoWriteTool,
     Tool,
@@ -81,14 +81,14 @@ class TestGlobTool:
         assert schema["required"] == ["pattern"]
 
 
-class TestSearchTool:
+class TestGrepTool:
     def test_default_values(self) -> None:
-        tool = SearchTool()
-        assert tool.name == "Search"
+        tool = GrepTool()
+        assert tool.name == "Grep"
         assert "ripgrep" in tool.description
 
     def test_input_schema_has_required_fields(self) -> None:
-        tool = SearchTool()
+        tool = GrepTool()
         schema = tool.input_schema
         props = get_properties(schema)
         assert "pattern" in props
@@ -258,7 +258,7 @@ class TestDefaultTools:
         expected_names = {
             "Bash",
             "Glob",
-            "Search",
+            "Grep",
             "Read",
             "Stat",
             "Edit",
