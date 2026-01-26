@@ -32,7 +32,7 @@ from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.styles import Style
-from rich.console import Console, RenderableType
+from rich.console import Console, Group, RenderableType
 from rich.json import JSON
 from rich.live import Live
 from rich.panel import Panel
@@ -503,23 +503,34 @@ Input:
                     self.print_history(format_thinking_message(thinking.thinking))
                     has_thinking = True
 
-            # Display text content
+            # Display text content with token count
             text_content = response.get_text()
             if text_content and text_content.strip():
                 # Add separator if there was thinking content
                 if has_thinking:
                     self.print_history(format_thinking_separator())
-                self.print_history(format_assistant_message(text_content))
-
-            # Display token count
-            self.print_history(
-                format_token_count(
-                    input_tokens=response.usage.input_tokens,
-                    output_tokens=response.usage.output_tokens,
-                    cache_creation_tokens=response.usage.cache_creation_input_tokens,
-                    cache_read_tokens=response.usage.cache_read_input_tokens,
+                # Display assistant message and token count together
+                self.print_history(
+                    Group(
+                        format_assistant_message(text_content),
+                        format_token_count(
+                            input_tokens=response.usage.input_tokens,
+                            output_tokens=response.usage.output_tokens,
+                            cache_creation_tokens=response.usage.cache_creation_input_tokens,
+                            cache_read_tokens=response.usage.cache_read_input_tokens,
+                        ),
+                    )
                 )
-            )
+            else:
+                # If no text content, just show token count
+                self.print_history(
+                    format_token_count(
+                        input_tokens=response.usage.input_tokens,
+                        output_tokens=response.usage.output_tokens,
+                        cache_creation_tokens=response.usage.cache_creation_input_tokens,
+                        cache_read_tokens=response.usage.cache_read_input_tokens,
+                    )
+                )
 
             # Handle tool calls
             tool_calls = response.get_tool_use()
