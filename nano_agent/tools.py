@@ -53,6 +53,29 @@ _pending_edits: dict[str, PendingEdit] = {}
 _EDIT_EXPIRY_SECONDS = 300
 
 
+def get_pending_edit(edit_id: str) -> PendingEdit | None:
+    """Get a pending edit by ID for display purposes.
+
+    Cleans up expired edits before returning.
+
+    Args:
+        edit_id: The edit ID to look up.
+
+    Returns:
+        The PendingEdit if found and not expired, None otherwise.
+    """
+    # Cleanup expired edits first
+    current_time = time.time()
+    expired = [
+        k
+        for k, v in _pending_edits.items()
+        if current_time - v.created_at > _EDIT_EXPIRY_SECONDS
+    ]
+    for k in expired:
+        del _pending_edits[k]
+    return _pending_edits.get(edit_id)
+
+
 # =============================================================================
 # Truncation Configuration and State
 # =============================================================================
@@ -806,6 +829,22 @@ class Tool:
     _no_input: ClassVar[bool] = False  # True if __call__ has no input parameter
     # Truncation config - override in subclasses to customize or disable
     _truncation_config: ClassVar[TruncationConfig | None] = None
+    # Required CLI commands - override in subclasses that need external CLI tools
+    # Format: {"command": "install instructions"}
+    _required_commands: ClassVar[dict[str, str]] = {}
+
+    def __post_init__(self) -> None:
+        """Validate that required CLI commands are available."""
+        missing_commands = []
+        for cmd, install_hint in self._required_commands.items():
+            if shutil.which(cmd) is None:
+                missing_commands.append((cmd, install_hint))
+
+        if missing_commands:
+            error_parts = [f"Missing required CLI command(s) for {self.name}:"]
+            for cmd, hint in missing_commands:
+                error_parts.append(f"  - '{cmd}': {hint}")
+            raise RuntimeError("\n".join(error_parts))
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Compute input schema from __call__ type annotation at class definition."""
@@ -986,30 +1025,20 @@ Examples:
 
 Note: Requires 'fd' to be installed (brew install fd)."""
 
+    _required_commands: ClassVar[dict[str, str]] = {
+        "fd": (
+            "Install with: brew install fd (macOS), "
+            "apt install fd-find (Ubuntu), pacman -S fd (Arch)"
+        )
+    }
+
     async def __call__(self, input: GlobInput) -> TextContent:
         """Execute glob pattern matching using fd."""
         import asyncio
         import os
-        import shutil
 
         path = input.path or "."
         pattern = input.pattern
-
-        # Check if fd is available
-        if shutil.which("fd") is None:
-            return TextContent(
-                text=(
-                    "Error: 'fd' command not found.\n\n"
-                    "GlobTool requires 'fd' (a fast file finder) to be installed.\n\n"
-                    "Installation instructions:\n"
-                    "  macOS:   brew install fd\n"
-                    "  Ubuntu:  apt install fd-find  "
-                    "(then: ln -s $(which fdfind) ~/.local/bin/fd)\n"
-                    "  Arch:    pacman -S fd\n"
-                    "  Windows: choco install fd\n\n"
-                    "More info: https://github.com/sharkdp/fd"
-                )
-            )
 
         # Build fd command
         # -g: glob mode, -t f: files only, -a: absolute paths
@@ -1083,23 +1112,15 @@ Examples:
   # Limit results with pagination
   GrepInput(pattern="import", head_limit=10, offset=5)"""
 
+    _required_commands: ClassVar[dict[str, str]] = {
+        "rg": (
+            "Install ripgrep: brew install ripgrep (macOS), "
+            "apt install ripgrep (Ubuntu), pacman -S ripgrep (Arch)"
+        )
+    }
+
     async def __call__(self, input: GrepInput) -> TextContent:
         """Execute grep search using ripgrep."""
-        # Check if ripgrep is available
-        if shutil.which("rg") is None:
-            return TextContent(
-                text=(
-                    "Error: 'rg' (ripgrep) command not found.\n\n"
-                    "GrepTool requires 'ripgrep' to be installed.\n\n"
-                    "Installation instructions:\n"
-                    "  macOS:   brew install ripgrep\n"
-                    "  Ubuntu:  apt install ripgrep\n"
-                    "  Arch:    pacman -S ripgrep\n"
-                    "  Windows: choco install ripgrep\n\n"
-                    "More info: https://github.com/BurntSushi/ripgrep"
-                )
-            )
-
         # Build ripgrep command
         cmd = ["rg"]
 
@@ -1476,7 +1497,7 @@ Workflow:
         header += "\n"
 
         footer = (
-            f'\n\n⚠️ Edit NOT applied. Call EditConfirm(edit_id="{edit_id}") to apply.\n'
+            f'\n\n⚠️ Edit NOT applied. Call EditConfirm(edit_id="{edit_id}") to apply if the edit matches what you want. Otherwise, ignore it.\n'
             f"Edit expires in {_EDIT_EXPIRY_SECONDS // 60} minutes."
         )
 
@@ -1640,24 +1661,15 @@ Note: Requires 'lynx' to be installed (brew install lynx)."""
 
     # Use centralized truncation with 5000 char limit (saves full output to temp file)
     _truncation_config: ClassVar[TruncationConfig] = TruncationConfig(max_chars=5000)
+    _required_commands: ClassVar[dict[str, str]] = {
+        "lynx": (
+            "Install lynx: brew install lynx (macOS), "
+            "apt install lynx (Ubuntu), pacman -S lynx (Arch)"
+        )
+    }
 
     async def __call__(self, input: WebFetchInput) -> TextContent:
         """Fetch URL content using lynx and return as text."""
-        # Check if lynx is available
-        if shutil.which("lynx") is None:
-            return TextContent(
-                text=(
-                    "Error: 'lynx' command not found.\n\n"
-                    "WebFetchTool requires 'lynx' (text-mode browser) to be installed.\n\n"
-                    "Installation instructions:\n"
-                    "  macOS:   brew install lynx\n"
-                    "  Ubuntu:  apt install lynx\n"
-                    "  Arch:    pacman -S lynx\n"
-                    "  Windows: choco install lynx\n\n"
-                    "More info: https://lynx.invisible-island.net/"
-                )
-            )
-
         url = input.url
 
         # Upgrade HTTP to HTTPS
@@ -2096,6 +2108,12 @@ Note: Requires 'uv' to be installed (pip install uv or brew install uv)."""
 
     # Disable truncation - PythonTool already has output_limit parameter
     _truncation_config: ClassVar[TruncationConfig] = TruncationConfig(enabled=False)
+    _required_commands: ClassVar[dict[str, str]] = {
+        "uv": (
+            "Install uv: pip install uv, brew install uv (macOS), "
+            "or curl -LsSf https://astral.sh/uv/install.sh | sh"
+        )
+    }
 
     async def _create(self, input: PythonInput) -> TextContent:
         """Create a new Python script file."""
@@ -2235,21 +2253,6 @@ Note: Requires 'uv' to be installed (pip install uv or brew install uv)."""
             return TextContent(
                 text="Error: Script file was deleted from disk.\n\n"
                 "Use 'create' operation to create a new script."
-            )
-
-        # Check if uv is available
-        if shutil.which("uv") is None:
-            return TextContent(
-                text=(
-                    "Error: 'uv' command not found.\n\n"
-                    "PythonTool requires 'uv' for dependency management.\n\n"
-                    "Installation instructions:\n"
-                    "  pip:     pip install uv\n"
-                    "  pipx:    pipx install uv\n"
-                    "  macOS:   brew install uv\n"
-                    "  curl:    curl -LsSf https://astral.sh/uv/install.sh | sh\n\n"
-                    "More info: https://github.com/astral-sh/uv"
-                )
             )
 
         # Build command

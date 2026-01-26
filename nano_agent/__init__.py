@@ -24,7 +24,6 @@ from .capture_claude_code_auth import (
 # API clients
 from .claude_api import ClaudeAPI, Response, Usage
 from .claude_code_api import ClaudeCodeAPI
-from .dummy_api import DummyAPI
 
 # Core graph primitives
 from .dag import DAG, Node
@@ -44,7 +43,6 @@ from .data_structures import (  # Message and roles; Content blocks; Node data t
     ToolResultContent,
     ToolUseContent,
 )
-
 # Executor
 from .executor import run
 from .gemini_api import GeminiAPI
@@ -62,6 +60,8 @@ from .tools import (
     Field,
     GlobInput,
     GlobTool,
+    GrepInput,
+    GrepTool,
     PendingEdit,
     PythonInput,
     PythonScript,
@@ -70,8 +70,6 @@ from .tools import (
     QuestionOption,
     ReadInput,
     ReadTool,
-    GrepInput,
-    GrepTool,
     StatInput,
     StatTool,
     Todo,
@@ -91,6 +89,7 @@ from .tools import (
     clear_python_scripts,
     convert_input,
     get_call_input_type,
+    get_pending_edit,
     list_python_scripts,
     schema_from_dataclass,
 )
@@ -103,7 +102,6 @@ __all__ = [
     "DAG",
     "ClaudeAPI",
     "ClaudeCodeAPI",
-    "DummyAPI",
     "GeminiAPI",
     "OpenAIAPI",
     "Response",
@@ -169,6 +167,7 @@ __all__ = [
     "PythonScript",
     "list_python_scripts",
     "clear_python_scripts",
+    "get_pending_edit",
     # Truncation utilities
     "TruncationConfig",
     "TruncatedOutput",

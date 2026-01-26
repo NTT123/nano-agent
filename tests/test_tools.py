@@ -49,6 +49,45 @@ class TestToolBase:
             "additionalProperties": False,
         }
 
+    def test_tool_required_commands_missing_raises_error(self) -> None:
+        """Test that missing required CLI commands raise RuntimeError on init."""
+        from dataclasses import dataclass
+        from typing import ClassVar
+
+        import pytest
+
+        @dataclass
+        class ToolWithMissingCommand(Tool):
+            name: str = "TestToolMissingCmd"
+            description: str = "A test tool requiring a non-existent command"
+            _required_commands: ClassVar[dict[str, str]] = {
+                "nonexistent_command_xyz123": "This command does not exist"
+            }
+
+        with pytest.raises(RuntimeError) as exc_info:
+            ToolWithMissingCommand()
+
+        assert "nonexistent_command_xyz123" in str(exc_info.value)
+        assert "This command does not exist" in str(exc_info.value)
+        assert "TestToolMissingCmd" in str(exc_info.value)
+
+    def test_tool_required_commands_present_succeeds(self) -> None:
+        """Test that tools with available CLI commands instantiate correctly."""
+        from dataclasses import dataclass
+        from typing import ClassVar
+
+        @dataclass
+        class ToolWithPresentCommand(Tool):
+            name: str = "TestToolPresentCmd"
+            description: str = "A test tool requiring a common command"
+            _required_commands: ClassVar[dict[str, str]] = {
+                "python": "Python should be available"  # Python is always available
+            }
+
+        # Should not raise
+        tool = ToolWithPresentCommand()
+        assert tool.name == "TestToolPresentCmd"
+
 
 class TestBashTool:
     def test_default_values(self) -> None:
@@ -749,6 +788,13 @@ class TestWebFetchToolFunctional:
     def test_webfetch_invalid_url(self) -> None:
         import shutil
 
+        # Skip if lynx is not installed (tool instantiation will raise RuntimeError)
+        if shutil.which("lynx") is None:
+            import pytest
+
+            pytest.skip("lynx not installed - covered by test_webfetch_dependency_check")
+            return
+
         tool = WebFetchTool()
         result = asyncio.run(
             tool.execute(
@@ -760,30 +806,20 @@ class TestWebFetchToolFunctional:
         )
         assert isinstance(result, TextContent)
         assert "Error" in result.text
-        # If lynx isn't installed, we get the dependency error first
-        # If lynx is installed, we get the invalid URL error
-        if shutil.which("lynx") is not None:
-            assert "Invalid URL" in result.text
-        else:
-            assert "'lynx'" in result.text
+        assert "Invalid URL" in result.text
 
     def test_webfetch_dependency_check(self) -> None:
-        """Test that missing lynx dependency is reported clearly."""
+        """Test that missing lynx dependency raises RuntimeError on init."""
         import shutil
 
         if shutil.which("lynx") is None:
-            tool = WebFetchTool()
-            result = asyncio.run(
-                tool.execute(
-                    {
-                        "url": "https://example.com",
-                        "prompt": "summarize",
-                    }
-                )
-            )
-            assert isinstance(result, TextContent)
-            assert "'lynx'" in result.text
-            assert "brew install lynx" in result.text
+            # When lynx is not installed, tool instantiation should raise RuntimeError
+            import pytest
+
+            with pytest.raises(RuntimeError) as exc_info:
+                WebFetchTool()
+            assert "'lynx'" in str(exc_info.value)
+            assert "Install lynx" in str(exc_info.value)
 
 
 # =============================================================================
@@ -1210,35 +1246,18 @@ class TestPythonToolFunctional:
         assert len(_python_scripts) == 0
 
     def test_dependency_check_uv(self) -> None:
-        """Test that missing uv dependency is reported clearly (if uv not installed)."""
+        """Test that missing uv dependency raises RuntimeError on init."""
         import shutil
 
-        # This test only meaningful if uv is not installed
-        # If uv IS installed, we verify the tool works
-        tool = PythonTool()
+        if shutil.which("uv") is None:
+            # When uv is not installed, tool instantiation should raise RuntimeError
+            import pytest
 
-        # Create a sandbox first
-        create_result = asyncio.run(
-            tool.execute(
-                {
-                    "operation": "create",
-                    "code": "print('test')",
-                }
-            )
-        )
-        assert isinstance(create_result, TextContent)
-
-        import re
-
-        match = re.search(r"file_id: (py_\w+)", create_result.text)
-        if match:
-            file_id = match.group(1)
-
-            if shutil.which("uv") is None:
-                # Test dependency error message
-                run_result = asyncio.run(
-                    tool.execute({"operation": "run", "file_id": file_id})
-                )
-                assert isinstance(run_result, TextContent)
-                assert "'uv'" in run_result.text
-                assert "pip install uv" in run_result.text
+            with pytest.raises(RuntimeError) as exc_info:
+                PythonTool()
+            assert "'uv'" in str(exc_info.value)
+            assert "Install uv" in str(exc_info.value)
+        else:
+            # If uv IS installed, verify the tool instantiates correctly
+            tool = PythonTool()
+            assert tool.name == "Python"

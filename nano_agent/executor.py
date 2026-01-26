@@ -3,19 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+from typing import Any, Awaitable, Callable
 
 import httpx
 
 from .api_base import APIError, APIProtocol
 from .cancellation import CancellationToken
 from .dag import DAG
-from .data_structures import Response
+from .data_structures import Response, TextContent
+
+# Type alias for permission callback
+# Takes (tool_name, tool_input) and returns True if allowed, False if denied
+PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool]]
 
 
 async def run(
     api: APIProtocol,
     dag: DAG,
     cancel_token: CancellationToken | None = None,
+    permission_callback: PermissionCallback | None = None,
 ) -> DAG:
     """Run agent loop until stop reason or cancellation.
 
@@ -23,6 +29,9 @@ async def run(
         api: ClaudeAPI client
         dag: Initial DAG with system prompt, tools, and user message
         cancel_token: Optional cancellation token for cooperative cancellation
+        permission_callback: Optional async callback for tool permission checks.
+            Called with (tool_name, tool_input). Returns True to allow, False to deny.
+            Currently used for EditConfirm to require user confirmation.
 
     Returns:
         Final DAG with all messages and tool results
@@ -120,6 +129,34 @@ async def run(
                 break
 
             tool = tool_map[call.name]
+
+            # Check permission for EditConfirm
+            if call.name == "EditConfirm" and permission_callback is not None:
+                allowed = await permission_callback(call.name, call.input or {})
+                if not allowed:
+                    result = TextContent(
+                        text="Permission denied: User rejected the edit operation. "
+                        "The file was NOT modified."
+                    )
+                    result_list = [result]
+                    result_node = tool_use_head.child(
+                        ToolExecution(
+                            tool_name=call.name,
+                            tool_use_id=call.id,
+                            result=result_list,
+                            is_error=True,
+                        )
+                    )
+                    result_nodes.append(result_node)
+                    tool_results.append(
+                        ToolResultContent(
+                            tool_use_id=call.id,
+                            content=result_list,
+                            is_error=True,
+                        )
+                    )
+                    continue  # Skip actual execution
+
             # Use execute() to convert dict input to typed dataclass
             try:
                 if cancel_token:

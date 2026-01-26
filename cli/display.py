@@ -291,9 +291,9 @@ def format_tool_result(result: str, is_error: bool = False) -> Text:
         # Diff-aware coloring
         for i, line in enumerate(lines):
             if line.startswith("  -  "):
-                result_text.append(line, style="on red")
+                result_text.append(line, style="on dark_red")
             elif line.startswith("  +  "):
-                result_text.append(line, style="on green")
+                result_text.append(line, style="on dark_green")
             else:
                 result_text.append(line, style="dim")
             if i < len(lines) - 1:

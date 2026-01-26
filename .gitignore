@@ -21,3 +21,10 @@ traces/
 # Generated files
 dag.html
 dag.json
+
+# Session files
+session.json
+chat.json
+
+# Swap files
+*.swp

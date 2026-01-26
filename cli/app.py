@@ -1,19 +1,19 @@
 """Simple Rich-based TUI application for nano-agent.
 
 This module provides a minimal terminal app that uses:
-- Rich Console.print() for history (terminal scrollback)
-- Rich Live context for dynamic buffer (current thinking/response)
+- Rich Console.print() for all output (history and responses)
+- Rich Live for spinner while waiting for API response
 - prompt_toolkit for input handling with history navigation
 
 Architecture:
-    Terminal Scrollback (not controlled by app)
+    Terminal Scrollback (all output via Console.print())
     ├── User message 1
-    ├── Assistant response 1
+    ├── Assistant response 1 (thinking + text)
+    ├── Tool calls and results
     └── ... (grows infinitely, terminal handles)
 
-    Dynamic Buffer (app controls via Rich Live)
-    ├── Current thinking/response (re-renderable)
-    └── Status indicators
+    Transient Spinner (Rich Live, removed after response)
+    └── "Thinking..." indicator during API call
 """
 
 from __future__ import annotations
@@ -40,16 +40,14 @@ from rich.spinner import Spinner
 from rich.text import Text
 from rich.theme import Theme
 
-# Terminal size constraints
-MIN_TERMINAL_WIDTH = 60
-MIN_TERMINAL_HEIGHT = 10
-
 from nano_agent import (
     DAG,
     ClaudeCodeAPI,
-    DummyAPI,
     GeminiAPI,
+    Message,
+    Role,
     TextContent,
+    ThinkingContent,
     ToolResultContent,
     ToolUseContent,
 )
@@ -66,6 +64,7 @@ from nano_agent.tools import (
     Tool,
     WebFetchTool,
     WriteTool,
+    get_pending_edit,
 )
 
 from .display import (
@@ -81,34 +80,51 @@ from .display import (
 )
 
 
-def build_system_prompt(model: str) -> str:
-    """Build system prompt with dynamic context."""
+def build_system_prompt(model: str) -> tuple[str, bool]:
+    """Build system prompt with dynamic context.
+    
+    Returns:
+        A tuple of (system_prompt, claude_md_loaded) where claude_md_loaded
+        indicates if CLAUDE.md was found and included in the prompt.
+    """
     cwd = os.getcwd()
     now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    claude_md_loaded = False
 
-    return f"""You are a helpful terminal assistant.
+    base_prompt = f"""You are a helpful terminal assistant.
 
 ## Context
 - Model: {model}
 - Working directory: {cwd}
 - Current time: {now}
 
-## Available Tools
-- Bash: Run bash commands
-- Read: Read files
-- Write: Write files
-- Edit, EditConfirm: Edit files
-- Glob: Find files by pattern
-- Grep: Search file contents
-- TodoWrite: Manage tasks
-- WebFetch: Fetch web content
-- Python: Create, edit, and run Python scripts with dependencies
+**Important**: Always use Edit/EditConfirm for file modifications. Do not use Bash for file editing (e.g., echo >, sed -i, etc.).
 
 Be concise but helpful. When using tools, explain briefly what you're doing."""
 
+    # Check for CLAUDE.md in the current working directory
+    claude_md_path = os.path.join(cwd, "CLAUDE.md")
+    if os.path.isfile(claude_md_path):
+        try:
+            with open(claude_md_path, "r", encoding="utf-8") as f:
+                claude_md_content = f.read()
+            base_prompt += f"""
+
+## Project Documentation (CLAUDE.md)
+
+The following document (CLAUDE.md) is the main document describing the project. The user prepared it to provide useful contextual information about the project and the practices that are important:
+
+{claude_md_content}"""
+            claude_md_loaded = True
+        except (IOError, OSError):
+            # If we can't read the file, just skip it silently
+            pass
+
+    return base_prompt, claude_md_loaded
+
 
 @dataclass
-class SimpleTerminalApp:
+class TerminalApp:
     """Simple Rich-based terminal app for nano-agent.
 
     Uses Rich Console for printing to history (terminal scrollback)
@@ -123,12 +139,12 @@ class SimpleTerminalApp:
             theme=Theme({"markdown.code": "cyan"}),
         )
     )
-    api: ClaudeCodeAPI | GeminiAPI | DummyAPI | None = None
-    use_dummy: bool = False
+    api: ClaudeCodeAPI | GeminiAPI | None = None
     use_gemini: bool = False
     gemini_model: str = "gemini-3-pro-preview"
     thinking_level: str = "low"
     debug: bool = False
+    continue_session: str | None = None
     dag: DAG | None = None
     tools: list[Tool] = field(default_factory=list)
     tool_map: dict[str, Tool] = field(default_factory=dict)
@@ -153,38 +169,6 @@ class SimpleTerminalApp:
             ]
         self.tool_map = {tool.name: tool for tool in self.tools}
 
-    def check_terminal_size(self) -> tuple[bool, int, int]:
-        """Check if terminal meets minimum size requirements.
-
-        Returns:
-            Tuple of (is_valid, current_width, current_height)
-        """
-        size = self.console.size
-        is_valid = (
-            size.width >= MIN_TERMINAL_WIDTH and size.height >= MIN_TERMINAL_HEIGHT
-        )
-        return is_valid, size.width, size.height
-
-    async def wait_for_valid_terminal_size(self) -> None:
-        """Block and display message until terminal is resized."""
-        with Live(console=self.console, refresh_per_second=4) as live:
-            while True:
-                is_valid, width, height = self.check_terminal_size()
-                if is_valid:
-                    break
-
-                # Display resize message
-                message = Text()
-                message.append("Terminal too small\n", style="bold red")
-                message.append(f"Current: {width}×{height}\n", style="dim")
-                message.append(
-                    f"Required: {MIN_TERMINAL_WIDTH}×{MIN_TERMINAL_HEIGHT}\n"
-                )
-                message.append("\nPlease resize your terminal.", style="yellow")
-
-                live.update(Panel(message, title="Resize Required"))
-                await asyncio.sleep(0.25)
-
     def print_history(self, content: Text | Panel | RenderableType | str) -> None:
         """Print content to history (scrolls into terminal scrollback)."""
         self.console.print(content)
@@ -193,15 +177,99 @@ class SimpleTerminalApp:
         """Print a blank line for visual separation."""
         self.console.print()
 
+    def render_history(self) -> None:
+        """Re-render all messages from the DAG.
+
+        This clears the console and re-displays all user messages, assistant
+        responses (including thinking), tool calls, and tool results from the
+        current DAG. Useful after loading a session or when terminal is resized.
+        """
+        if not self.dag or not self.dag._heads:
+            self.print_history(format_system_message("No conversation history to render."))
+            return
+
+        self.console.clear()
+
+        # Iterate through all nodes in causal order (parents before children)
+        for node in self.dag.head.ancestors():
+            if isinstance(node.data, Message):
+                if node.data.role == Role.USER:
+                    # User message - can be string or list of content blocks
+                    if isinstance(node.data.content, str):
+                        self.print_history(format_user_message(node.data.content))
+                    else:
+                        # Check what type of content blocks we have
+                        text_parts = []
+                        tool_results = []
+                        for block in node.data.content:
+                            if isinstance(block, TextContent):
+                                text_parts.append(block.text)
+                            elif isinstance(block, ToolResultContent):
+                                tool_results.append(block)
+
+                        # Render text content as user message
+                        if text_parts:
+                            self.print_history(format_user_message("\n".join(text_parts)))
+
+                        # Render tool results
+                        for tool_result in tool_results:
+                            if isinstance(tool_result.content, str):
+                                result_text = tool_result.content
+                            else:
+                                result_parts = []
+                                for content_block in tool_result.content:
+                                    if isinstance(content_block, TextContent):
+                                        result_parts.append(content_block.text)
+                                result_text = "\n".join(result_parts)
+                            is_error = tool_result.is_error if hasattr(tool_result, "is_error") else False
+                            self.print_history(format_tool_result(result_text, is_error=is_error))
+
+                elif node.data.role == Role.ASSISTANT:
+                    # Assistant message - may have thinking and text content
+                    if isinstance(node.data.content, str):
+                        if node.data.content.strip():
+                            self.print_history(format_assistant_message(node.data.content))
+                    else:
+                        # Process content blocks
+                        thinking_blocks = []
+                        text_parts = []
+                        tool_uses = []
+
+                        for block in node.data.content:
+                            if isinstance(block, ThinkingContent):
+                                if block.thinking:
+                                    thinking_blocks.append(block.thinking)
+                            elif isinstance(block, TextContent):
+                                if block.text.strip():
+                                    text_parts.append(block.text)
+                            elif isinstance(block, ToolUseContent):
+                                tool_uses.append(block)
+
+                        # Display thinking content
+                        for thinking in thinking_blocks:
+                            self.print_history(format_thinking_message(thinking))
+
+                        # Display text content with separator if there was thinking
+                        if text_parts:
+                            if thinking_blocks:
+                                self.print_history(format_thinking_separator())
+                            self.print_history(format_assistant_message("\n".join(text_parts)))
+
+                        # Display tool calls
+                        for tool_use in tool_uses:
+                            self.print_history(
+                                format_tool_call(tool_use.name, tool_use.input or {})
+                            )
+
+        self.print_history(format_system_message("History rendered."))
+
     async def initialize_api(self) -> bool:
-        """Initialize the API client (ClaudeCodeAPI, GeminiAPI, or DummyAPI).
+        """Initialize the API client (ClaudeCodeAPI or GeminiAPI).
 
         Returns:
             True if initialization successful, False otherwise.
         """
-        if self.use_dummy:
-            return await self._initialize_dummy_api()
-        elif self.use_gemini:
+        if self.use_gemini:
             return await self._initialize_gemini_api()
         else:
             return await self._initialize_claude_api()
@@ -213,8 +281,11 @@ class SimpleTerminalApp:
         try:
             self.api = ClaudeCodeAPI()
             model = self.api.model
-            self.dag = DAG().system(build_system_prompt(model)).tools(*self.tools)
+            system_prompt, claude_md_loaded = build_system_prompt(model)
+            self.dag = DAG().system(system_prompt).tools(*self.tools)
             self.print_history(format_system_message(f"Connected using {model}"))
+            if claude_md_loaded:
+                self.print_history(format_system_message("Loaded CLAUDE.md into system prompt"))
             self.print_blank()
             return True
 
@@ -238,8 +309,11 @@ class SimpleTerminalApp:
                 thinking_level=self.thinking_level,
             )
             model = self.api.model
-            self.dag = DAG().system(build_system_prompt(model)).tools(*self.tools)
+            system_prompt, claude_md_loaded = build_system_prompt(model)
+            self.dag = DAG().system(system_prompt).tools(*self.tools)
             self.print_history(format_system_message(f"Connected using {model}"))
+            if claude_md_loaded:
+                self.print_history(format_system_message("Loaded CLAUDE.md into system prompt"))
             self.print_blank()
             return True
 
@@ -251,29 +325,6 @@ class SimpleTerminalApp:
                 )
             )
             return False
-
-    async def _initialize_dummy_api(self) -> bool:
-        """Initialize Dummy API provider for testing."""
-        self.print_history(
-            format_system_message("Initializing Dummy API for testing...")
-        )
-
-        self.api = DummyAPI(
-            model="dummy-model-v1",
-            thinking_probability=0.3,
-            tool_call_probability=0.5,
-            max_tool_calls=2,
-        )
-        model = self.api.model
-        self.dag = DAG().system(build_system_prompt(model)).tools(*self.tools)
-        self.print_history(
-            format_system_message(
-                f"Dummy API initialized ({model})\n"
-                "This is a test provider that generates random responses."
-            )
-        )
-        self.print_blank()
-        return True
 
     async def get_user_input(self) -> str | None:
         """Get user input using prompt_toolkit.
@@ -348,17 +399,29 @@ class SimpleTerminalApp:
         if cmd == "/clear":
             # Clear screen and reset conversation
             self.console.clear()
+            claude_md_loaded = False
             if self.dag and self.api:
                 model = self.api.model
-                self.dag = DAG().system(build_system_prompt(model)).tools(*self.tools)
+                system_prompt, claude_md_loaded = build_system_prompt(model)
+                self.dag = DAG().system(system_prompt).tools(*self.tools)
             self.print_history(format_system_message("Conversation reset."))
+            if claude_md_loaded:
+                self.print_history(format_system_message("Loaded CLAUDE.md into system prompt"))
+            return True
+
+        if cmd == "/render":
+            # Re-render all history (useful after terminal resize)
+            self.render_history()
             return True
 
         if cmd == "/help":
             help_text = """Commands:
   /quit, /exit, /q - Exit the application
   /clear - Reset conversation and clear screen
+  /render - Re-render history (useful after terminal resize)
   /debug - Show DAG as JSON
+  /save [filename] - Save session to file (default: session.json)
+  /load [filename] - Load session from file (default: session.json)
   /help - Show this help message
 
 Input:
@@ -385,9 +448,108 @@ Input:
                 self.print_history(format_system_message("No DAG initialized."))
             return True
 
+        # /save [filename] - Save the current DAG to a file
+        if cmd.startswith("/save"):
+            parts = command.strip().split(maxsplit=1)
+            filename = parts[1] if len(parts) > 1 else "session.json"
+            if not filename.endswith(".json"):
+                filename += ".json"
+            if self.dag and self.dag._heads:
+                try:
+                    filepath = Path(filename).resolve()
+                    self.dag.save(filepath, session_id=datetime.now().isoformat())
+                    self.print_history(
+                        format_system_message(f"Session saved to: {filepath}")
+                    )
+                except Exception as e:
+                    self.print_history(format_error_message(f"Failed to save: {e}"))
+            else:
+                self.print_history(format_system_message("No DAG to save."))
+            return True
+
+        # /load [filename] - Load a DAG from a file
+        if cmd.startswith("/load"):
+            parts = command.strip().split(maxsplit=1)
+            filename = parts[1] if len(parts) > 1 else "session.json"
+            if not filename.endswith(".json"):
+                filename += ".json"
+            filepath = Path(filename).resolve()
+            if not filepath.exists():
+                self.print_history(
+                    format_error_message(f"File not found: {filepath}")
+                )
+                return True
+            try:
+                loaded_dag, metadata = DAG.load(filepath)
+                # Restore tools to the loaded DAG
+                if self.tools:
+                    loaded_dag = loaded_dag.tools(*self.tools)
+                self.dag = loaded_dag
+                session_id = metadata.get("session_id", "unknown")
+                node_count = len(metadata.get("nodes", {}))
+                # Render the loaded session history
+                self.render_history()
+                self.print_history(
+                    format_system_message(
+                        f"Session loaded from: {filepath}\n"
+                        f"  Session ID: {session_id}\n"
+                        f"  Nodes: {node_count}"
+                    )
+                )
+            except Exception as e:
+                self.print_history(format_error_message(f"Failed to load: {e}"))
+            return True
+
         self.print_history(format_error_message(f"Unknown command: {command}"))
         self.print_history(format_system_message("Type /help for available commands."))
         return True
+
+    async def _permission_callback(
+        self, tool_name: str, tool_input: dict[str, Any]
+    ) -> bool:
+        """Interactive permission prompt for EditConfirm.
+
+        Args:
+            tool_name: The name of the tool being called.
+            tool_input: The input parameters for the tool.
+
+        Returns:
+            True if the user allows the operation, False otherwise.
+        """
+        if tool_name != "EditConfirm":
+            return True
+
+        edit_id = tool_input.get("edit_id", "")
+        if not edit_id:
+            return True  # Let tool handle validation error
+
+        pending = get_pending_edit(edit_id)
+        if pending is None:
+            return True  # Let tool handle expired/missing error
+
+        # Display edit details
+        self.print_blank()
+        self.print_history(Text("─── Permission Required ───", style="yellow bold"))
+        self.print_history(Text(f"File: {pending.file_path}", style="cyan"))
+
+        if pending.replace_all and pending.match_count > 1:
+            self.print_history(
+                Text(
+                    f"(Replacing {pending.match_count} occurrences)", style="yellow dim"
+                )
+            )
+
+        self.print_blank()
+
+        # Prompt for confirmation
+        try:
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None, lambda: input("Allow this edit? [y/N]: ").strip().lower()
+            )
+            return response in ("y", "yes")
+        except (EOFError, KeyboardInterrupt):
+            return False
 
     async def _execute_tool(
         self, tool_call: ToolUseContent, cancellable: bool = True
@@ -395,6 +557,25 @@ Input:
         """Execute a tool call, optionally with cancellation support."""
         if not self.dag:
             return
+
+        # Check permission for EditConfirm before execution
+        if tool_call.name == "EditConfirm":
+            allowed = await self._permission_callback(
+                tool_call.name, tool_call.input or {}
+            )
+            if not allowed:
+                self.print_history(format_system_message("Edit rejected by user."))
+                error_result = TextContent(
+                    text="Permission denied: User rejected the edit operation. "
+                    "The file was NOT modified."
+                )
+                self.print_history(format_tool_result(error_result.text, is_error=True))
+                self.dag = self.dag.tool_result(
+                    ToolResultContent(
+                        tool_use_id=tool_call.id, content=[error_result], is_error=True
+                    )
+                )
+                return
 
         self.print_history(format_tool_call(tool_call.name, tool_call.input or {}))
 
@@ -556,9 +737,6 @@ Input:
     async def run(self) -> None:
         """Main application loop."""
         try:
-            # Ensure terminal is large enough before starting
-            await self.wait_for_valid_terminal_size()
-
             # Print header
             self.print_history(Text("nano-cli", style="bold cyan"))
             self.print_history(
@@ -573,11 +751,39 @@ Input:
             if not await self.initialize_api():
                 return
 
+            # Load session if --continue was specified
+            if self.continue_session:
+                filename = self.continue_session
+                if not filename.endswith(".json"):
+                    filename += ".json"
+                filepath = Path(filename).resolve()
+                if not filepath.exists():
+                    self.print_history(
+                        format_error_message(f"Session file not found: {filepath}")
+                    )
+                else:
+                    try:
+                        loaded_dag, metadata = DAG.load(filepath)
+                        # Restore tools to the loaded DAG
+                        if self.tools:
+                            loaded_dag = loaded_dag.tools(*self.tools)
+                        self.dag = loaded_dag
+                        session_id = metadata.get("session_id", "unknown")
+                        node_count = len(metadata.get("nodes", {}))
+                        # Render the loaded session history
+                        self.render_history()
+                        self.print_history(
+                            format_system_message(
+                                f"Continuing session from: {filepath}\n"
+                                f"  Session ID: {session_id}\n"
+                                f"  Nodes: {node_count}"
+                            )
+                        )
+                    except Exception as e:
+                        self.print_history(format_error_message(f"Failed to load session: {e}"))
+
             # Main input loop
             while True:
-                # Check terminal size before each prompt
-                await self.wait_for_valid_terminal_size()
-
                 user_input = await self.get_user_input()
 
                 if user_input is None:
@@ -608,11 +814,6 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="nano-cli")
     parser.add_argument(
-        "--dummy",
-        action="store_true",
-        help="Use dummy API provider for testing (no credentials needed)",
-    )
-    parser.add_argument(
         "--gemini",
         metavar="MODEL",
         nargs="?",
@@ -630,14 +831,22 @@ def main() -> None:
         action="store_true",
         help="Show debug output (raw response blocks)",
     )
+    parser.add_argument(
+        "--continue",
+        dest="continue_session",
+        metavar="FILE",
+        nargs="?",
+        const="session.json",
+        help="Continue from a saved session (default: session.json)",
+    )
     args = parser.parse_args()
 
-    app = SimpleTerminalApp(
-        use_dummy=args.dummy,
+    app = TerminalApp(
         use_gemini=args.gemini is not None,
         gemini_model=args.gemini or "gemini-3-pro-preview",
         thinking_level=args.thinking_level,
         debug=args.debug,
+        continue_session=args.continue_session,
     )
     try:
         asyncio.run(app.run())

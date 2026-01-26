@@ -10,14 +10,14 @@ Usage:
     nano-cli
 
 Features:
-    - Uses terminal's native scrollback for history
-    - Rich Live context for dynamic status display
+    - Rich Console.print() for all output (history and responses)
+    - Rich Live for spinner while waiting for API response
     - prompt_toolkit for input with history
     - Ctrl+C to cancel running operations
     - Ctrl+D to exit
     - Lightweight, minimal dependencies
 """
 
-from .app import SimpleTerminalApp, main
+from .app import TerminalApp, main
 
-__all__ = ["SimpleTerminalApp", "main"]
+__all__ = ["TerminalApp", "main"]
