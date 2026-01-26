@@ -6,6 +6,7 @@ the Claude Code CLI format for API authentication.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -28,24 +29,23 @@ DEFAULT_HEADERS = {
     "content-type": "application/json",
     "user-agent": "claude-cli/2.1.17 (external, sdk-cli)",
     "x-app": "cli",
+    "x-stainless-arch": "arm64",
+    "x-stainless-lang": "js",
+    "x-stainless-os": "MacOS",
+    "x-stainless-package-version": "0.70.0",
+    "x-stainless-retry-count": "0",
+    "x-stainless-runtime": "node",
+    "x-stainless-runtime-version": "v24.3.0",
+    "x-stainless-timeout": "600",
 }
-
-# Default system messages matching Claude Code CLI format
-DEFAULT_SYSTEM = [
-    {
-        "type": "text",
-        "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
-        "cache_control": {"type": "ephemeral"},
-    },
-]
-
 
 class ClaudeCodeAPI(APIClientMixin):
     """Claude API client with Claude Code compatible headers.
 
     Credential resolution order:
     1. Explicit auth_token parameter
-    2. Config file (~/.nano-agent.json)
+    2. CLAUDE_CODE_OAUTH_TOKEN environment variable
+    3. Config file (~/.nano-agent.json)
 
     This client uses hardcoded headers matching the Claude Code CLI format.
     Pass your OAuth token directly to authenticate, or use the config file
@@ -72,22 +72,23 @@ class ClaudeCodeAPI(APIClientMixin):
 
         Args:
             auth_token: OAuth token (sk-ant-oat01-...) or API key (sk-ant-...).
-                       If not provided, loads from config file.
-            model: Model to use (default from config or claude-sonnet-4-20250514)
-            max_tokens: Maximum tokens in response (default from config or 16000)
-            thinking_budget: Token budget for thinking (default from config or 10000)
+                       If not provided, checks CLAUDE_CODE_OAUTH_TOKEN env var,
+                       then loads from config file.
+            model: Model to use (default from config or claude-opus-4-5-20251101)
+            max_tokens: Maximum tokens in response (default from config or 32000)
+            thinking_budget: Token budget for thinking (default from config or 20000)
             temperature: Temperature for sampling (default from config or 1.0)
-            user_id: User ID for metadata (default from config or "nano-claude")
+            user_id: User ID for metadata (default from config or "nano-agent")
             base_url: API endpoint URL
             config_path: Path to config file (default: ~/.nano-agent.json)
         """
-        # Defaults
+        # Defaults (matching Claude Code CLI)
         defaults: dict[str, Any] = {
-            "model": "claude-sonnet-4-20250514",
-            "max_tokens": 16000,
-            "thinking_budget": 10000,
+            "model": "claude-opus-4-5-20251101",
+            "max_tokens": 32000,
+            "thinking_budget": 20000,
             "temperature": 1.0,
-            "user_id": "nano-claude",
+            "user_id": "nano-agent",
             "base_url": "https://api.anthropic.com/v1/messages?beta=true",
         }
 
@@ -124,8 +125,10 @@ class ClaudeCodeAPI(APIClientMixin):
         except ImportError:
             pass  # Config loading not available
 
-        # Resolve auth token: explicit > config
+        # Resolve auth token: explicit > env var > config
         resolved_token = auth_token
+        if not resolved_token:
+            resolved_token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
         if not resolved_token and config_headers:
             auth = config_headers.get("authorization", "")
             if auth.startswith("Bearer "):
@@ -133,8 +136,8 @@ class ClaudeCodeAPI(APIClientMixin):
 
         if not resolved_token:
             raise ValueError(
-                "Auth token required. Provide auth_token or create ~/.nano-agent.json "
-                "(via get_config())"
+                "Auth token required. Provide auth_token, set CLAUDE_CODE_OAUTH_TOKEN "
+                "env var, or create ~/.nano-agent.json (via get_config())"
             )
 
         self.auth_token = resolved_token
@@ -158,15 +161,18 @@ class ClaudeCodeAPI(APIClientMixin):
             self.headers = DEFAULT_HEADERS.copy()
             self.headers["authorization"] = f"Bearer {self.auth_token}"
 
-        # Ensure oauth beta flag is present for OAuth tokens (sk-ant-oat*)
-        if self.auth_token.startswith("sk-ant-oat"):
-            beta = self.headers.get("anthropic-beta", "")
-            if "oauth-2025-04-20" not in beta:
-                # Add oauth flag to existing beta features
-                if beta:
-                    self.headers["anthropic-beta"] = f"{beta},oauth-2025-04-20"
-                else:
-                    self.headers["anthropic-beta"] = "oauth-2025-04-20"
+        # Ensure all required beta flags are present
+        required_betas = [
+            "claude-code-20250219",
+            "oauth-2025-04-20",
+            "interleaved-thinking-2025-05-14",
+        ]
+        beta = self.headers.get("anthropic-beta", "")
+        beta_parts = [b.strip() for b in beta.split(",") if b.strip()]
+        for required in required_betas:
+            if required not in beta_parts:
+                beta_parts.append(required)
+        self.headers["anthropic-beta"] = ",".join(beta_parts)
 
         # Create reusable HTTP client
         self._client = httpx.AsyncClient(timeout=600.0)
@@ -219,7 +225,7 @@ class ClaudeCodeAPI(APIClientMixin):
             if self.captured_system:
                 system_messages: list[dict[str, Any]] = list(self.captured_system)
             else:
-                system_messages = list(DEFAULT_SYSTEM)
+                system_messages = []
             if dag_system_prompts:
                 system_messages.extend(
                     {"type": "text", "text": prompt} for prompt in dag_system_prompts
@@ -232,7 +238,7 @@ class ClaudeCodeAPI(APIClientMixin):
             if self.captured_system:
                 system_messages = list(self.captured_system)
             else:
-                system_messages = list(DEFAULT_SYSTEM)
+                system_messages = []
 
         # Build request body
         request_body: dict[str, Any] = {
