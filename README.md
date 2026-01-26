@@ -73,21 +73,32 @@ cd nano-agent
 uv sync
 ```
 
-## nano-cli
+## CLI
 
-<img src="screenshot.png" alt="nano-cli screenshot" width="600">
+A simple terminal interface for interacting with Claude, similar to Claude Code.
 
-Simple terminal UI for debugging:
+### Installation
+
+Install the CLI globally using uv:
 
 ```bash
-uv run nano-agent-capture-auth
-uv run nano-cli
+uv tool install git+https://github.com/NTT123/nano-agent.git
 ```
 
-Or install as a tool:
+### Authentication
+
+Capture your Claude Code auth credentials first:
 
 ```bash
-uv tool install .
+nano-agent-capture-auth
+```
+
+### Usage
+
+Once installed, you can use `nano-cli` from any project directory, just like Claude Code:
+
+```bash
+cd your-project
 nano-cli
 ```
 

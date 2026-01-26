@@ -38,6 +38,7 @@ from rich.live import Live
 from rich.panel import Panel
 from rich.spinner import Spinner
 from rich.text import Text
+from rich.theme import Theme
 
 # Terminal size constraints
 MIN_TERMINAL_WIDTH = 60
@@ -52,6 +53,7 @@ from nano_agent import (
     ToolResultContent,
     ToolUseContent,
 )
+from nano_agent.cancellation import CancellationToken
 from nano_agent.tools import (
     BashTool,
     EditConfirmTool,
@@ -66,7 +68,6 @@ from nano_agent.tools import (
     WriteTool,
 )
 
-from nano_agent.cancellation import CancellationToken
 from .display import (
     format_assistant_message,
     format_error_message,
@@ -115,7 +116,13 @@ class SimpleTerminalApp:
     """
 
     # soft_wrap=True: Let terminal handle line wrapping naturally
-    console: Console = field(default_factory=lambda: Console(soft_wrap=True))
+    # Custom theme removes background from inline code (markdown.code)
+    console: Console = field(
+        default_factory=lambda: Console(
+            soft_wrap=True,
+            theme=Theme({"markdown.code": "cyan"}),
+        )
+    )
     api: ClaudeCodeAPI | GeminiAPI | DummyAPI | None = None
     use_dummy: bool = False
     use_gemini: bool = False
@@ -247,7 +254,9 @@ class SimpleTerminalApp:
 
     async def _initialize_dummy_api(self) -> bool:
         """Initialize Dummy API provider for testing."""
-        self.print_history(format_system_message("Initializing Dummy API for testing..."))
+        self.print_history(
+            format_system_message("Initializing Dummy API for testing...")
+        )
 
         self.api = DummyAPI(
             model="dummy-model-v1",
@@ -306,11 +315,14 @@ class SimpleTerminalApp:
             if text:
                 # Clear the echoed input line(s) so we can reprint with formatting
                 # Count lines: 1 for the prompt + any newlines in input + 1 for bottom_toolbar
-                line_count = 2 + text.count("\n")
-                for _ in range(line_count):
-                    # Move cursor up and clear the line
-                    self.console.file.write("\033[A\033[2K")
-                self.console.file.flush()
+                try:
+                    line_count = 2 + text.count("\n")
+                    for _ in range(line_count):
+                        # Move cursor up and clear the line
+                        self.console.file.write("\033[A\033[2K")
+                    self.console.file.flush()
+                except (OSError, IOError):
+                    pass  # Terminal doesn't support ANSI - skip clearing
             return text.strip() if text else None
         except EOFError:
             # Ctrl+D pressed - signal to exit
@@ -377,12 +389,13 @@ Input:
         self.print_history(format_system_message("Type /help for available commands."))
         return True
 
-    async def execute_tool(self, tool_call: ToolUseContent) -> None:
-        """Execute a tool call and add result to DAG."""
+    async def _execute_tool(
+        self, tool_call: ToolUseContent, cancellable: bool = True
+    ) -> None:
+        """Execute a tool call, optionally with cancellation support."""
         if not self.dag:
             return
 
-        # Display tool call
         self.print_history(format_tool_call(tool_call.name, tool_call.input or {}))
 
         tool = self.tool_map.get(tool_call.name)
@@ -397,60 +410,18 @@ Input:
             return
 
         try:
-            result = await tool.execute(tool_call.input)
+            if cancellable:
+                result = await self.cancel_token.run(tool.execute(tool_call.input))
+            else:
+                result = await tool.execute(tool_call.input)
             result_list = result if isinstance(result, list) else [result]
             result_text = "\n".join(r.text for r in result_list)
-
             self.print_history(format_tool_result(result_text))
-
             self.dag = self.dag.tool_result(
                 ToolResultContent(tool_use_id=tool_call.id, content=result_list)
             )
-
-        except Exception as e:
-            error_result = TextContent(text=f"Tool error: {e}")
-            self.print_history(format_tool_result(error_result.text, is_error=True))
-            self.dag = self.dag.tool_result(
-                ToolResultContent(
-                    tool_use_id=tool_call.id, content=[error_result], is_error=True
-                )
-            )
-
-    async def _execute_tool_cancellable(self, tool_call: ToolUseContent) -> None:
-        """Execute a tool call with cancellation support."""
-        if not self.dag:
-            return
-
-        # Display tool call
-        self.print_history(format_tool_call(tool_call.name, tool_call.input or {}))
-
-        tool = self.tool_map.get(tool_call.name)
-        if not tool:
-            error_result = TextContent(text=f"Unknown tool: {tool_call.name}")
-            self.print_history(format_tool_result(error_result.text, is_error=True))
-            self.dag = self.dag.tool_result(
-                ToolResultContent(
-                    tool_use_id=tool_call.id, content=[error_result], is_error=True
-                )
-            )
-            return
-
-        try:
-            # Wrap tool execution in cancellable task
-            result = await self.cancel_token.run(tool.execute(tool_call.input))
-            result_list = result if isinstance(result, list) else [result]
-            result_text = "\n".join(r.text for r in result_list)
-
-            self.print_history(format_tool_result(result_text))
-
-            self.dag = self.dag.tool_result(
-                ToolResultContent(tool_use_id=tool_call.id, content=result_list)
-            )
-
         except asyncio.CancelledError:
-            # Don't add partial tool result - just re-raise
             raise
-
         except Exception as e:
             error_result = TextContent(text=f"Tool error: {e}")
             self.print_history(format_tool_result(error_result.text, is_error=True))
@@ -542,7 +513,7 @@ Input:
                 # Check for cancellation before each tool
                 if self.cancel_token.is_cancelled:
                     raise asyncio.CancelledError()
-                await self._execute_tool_cancellable(tool_call)
+                await self._execute_tool(tool_call, cancellable=True)
 
     async def send_message(self, text: str) -> None:
         """Send a user message and handle the response with agent loop."""
@@ -577,50 +548,58 @@ Input:
         # Visual gap after complete response
         self.print_blank()
 
+    async def cleanup(self) -> None:
+        """Clean up resources."""
+        if self.api and hasattr(self.api, "client"):
+            await self.api.client.aclose()
+
     async def run(self) -> None:
         """Main application loop."""
-        # Ensure terminal is large enough before starting
-        await self.wait_for_valid_terminal_size()
-
-        # Print header
-        self.print_history(Text("nano-cli", style="bold cyan"))
-        self.print_history(
-            Text(
-                "Type your message. /help for commands. Ctrl+C to cancel. Ctrl+D to exit.",
-                style="dim",
-            )
-        )
-        self.print_blank()
-
-        # Initialize API
-        if not await self.initialize_api():
-            return
-
-        # Main input loop
-        while True:
-            # Check terminal size before each prompt
+        try:
+            # Ensure terminal is large enough before starting
             await self.wait_for_valid_terminal_size()
 
-            user_input = await self.get_user_input()
+            # Print header
+            self.print_history(Text("nano-cli", style="bold cyan"))
+            self.print_history(
+                Text(
+                    "Type your message. /help for commands. Ctrl+C to cancel. Ctrl+D to exit.",
+                    style="dim",
+                )
+            )
+            self.print_blank()
 
-            if user_input is None:
-                # User pressed Ctrl+D
-                self.print_blank()
-                self.print_history(format_system_message("Goodbye!"))
-                break
+            # Initialize API
+            if not await self.initialize_api():
+                return
 
-            if not user_input:
-                continue
+            # Main input loop
+            while True:
+                # Check terminal size before each prompt
+                await self.wait_for_valid_terminal_size()
 
-            # Handle slash commands
-            if user_input.startswith("/"):
-                if not self.handle_command(user_input):
+                user_input = await self.get_user_input()
+
+                if user_input is None:
+                    # User pressed Ctrl+D
+                    self.print_blank()
                     self.print_history(format_system_message("Goodbye!"))
                     break
-                continue
 
-            # Send message to Claude
-            await self.send_message(user_input)
+                if not user_input:
+                    continue
+
+                # Handle slash commands
+                if user_input.startswith("/"):
+                    if not self.handle_command(user_input):
+                        self.print_history(format_system_message("Goodbye!"))
+                        break
+                    continue
+
+                # Send message to Claude
+                await self.send_message(user_input)
+        finally:
+            await self.cleanup()
 
 
 def main() -> None:

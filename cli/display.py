@@ -141,7 +141,12 @@ class SimpleCodeBlock(TextElement):
         # padding=0 removes the left space that causes copy issues
         # word_wrap=False lets terminal handle wrapping for better copy-paste
         syntax = Syntax(
-            code, self.lexer_name, theme=self.theme, word_wrap=False, padding=0
+            code,
+            self.lexer_name,
+            theme=self.theme,
+            word_wrap=False,
+            padding=0,
+            background_color="default",
         )
         yield syntax
 
@@ -190,6 +195,8 @@ class LimitedMarkdown(Markdown):
     - fence: Uses SimpleCodeBlock (fenced code blocks like ```python)
     - table_open: Uses SimpleTableElement (MINIMAL box style)
     - list_item_open: Uses WideListItem (no truncation of long lines)
+
+    Note: Inline code styling is controlled via console theme (markdown.code style).
     """
 
     elements = {
