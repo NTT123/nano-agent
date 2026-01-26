@@ -7,7 +7,7 @@ A Rich-based terminal app for interacting with Claude:
 - Automatic authentication via Claude CLI (auto-captures on first run)
 
 Usage:
-    nano-chat
+    nano-cli
 
 Features:
     - Uses terminal's native scrollback for history

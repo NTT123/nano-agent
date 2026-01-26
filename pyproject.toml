@@ -33,7 +33,7 @@ Issues = "https://github.com/NTT123/nano_agent/issues"
 # Convenience commands for running examples
 nano-agent-example-hello-world = "examples.hello_world:main"
 # TUI application
-nano-chat = "tui:main"
+nano-cli = "tui:main"
 # Utility commands
 nano-agent-viewer = "scripts.viewer:main"
 nano-agent-console-viewer = "scripts.console_viewer:main"
@@ -76,6 +76,6 @@ module = "tui.display"
 disable_error_code = ["misc"]
 
 [[tool.mypy.overrides]]
-module = "tui.simple_app"
+module = "tui.app"
 # prompt_toolkit decorator doesn't preserve types
 disable_error_code = ["misc", "untyped-decorator"]
