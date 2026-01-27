@@ -513,7 +513,7 @@ class TerminalApp:
 Input:
   Enter - Send message
   Ctrl+J - Insert new line (for multiline input)
-  Ctrl+C - Cancel current operation
+  Esc - Cancel current operation
   Ctrl+D - Exit"""
             self.print_history(format_system_message(help_text))
             return True
@@ -678,7 +678,9 @@ Input:
 
         try:
             if cancellable:
-                result = await self.cancel_token.run(tool.execute(tool_call.input))
+                result = await self.cancel_token.run_with_escape(
+                    tool.execute(tool_call.input)
+                )
             else:
                 result = await tool.execute(tool_call.input)
             result_list = result if isinstance(result, list) else [result]
@@ -708,17 +710,18 @@ Input:
             if self.cancel_token.is_cancelled:
                 raise asyncio.CancelledError()
 
-            # Show spinner in dynamic area while waiting
-            with Live(
-                Spinner("dots", text="Thinking... (Ctrl+C to cancel)"),
-                console=self.console,
-                refresh_per_second=10,
-                transient=True,  # Remove spinner when done
-            ) as live:
-                # Wrap API call in cancellable task
-                response = await self.cancel_token.run(self.api.send(self.dag))
-                # Update with completion indicator briefly
-                live.update(Text("Response received", style="green dim"))
+            # Show status and wait for response (Esc to cancel)
+            self.console.print(
+                Spinner("dots", text="Thinking... (Esc to cancel)"),
+                end="\r",
+            )
+            try:
+                response = await self.cancel_token.run_with_escape(
+                    self.api.send(self.dag)
+                )
+            finally:
+                # Clear the spinner line
+                self.console.print(" " * 40, end="\r")
 
             # Add response to DAG
             self.dag = self.dag.assistant(response.content)
@@ -801,12 +804,12 @@ Input:
         try:
             await self._agent_loop()
         except KeyboardInterrupt:
-            # Ctrl+C pressed - cancel the operation
+            # Ctrl+C pressed - fallback cancellation
             self.cancel_token.cancel()
             self.dag = self.dag.user("[Operation cancelled by user]")
             self.print_history(format_error_message("Operation cancelled."))
         except asyncio.CancelledError:
-            # Cancelled via token (e.g., from tool execution)
+            # Cancelled via Escape key or token
             self.dag = self.dag.user("[Operation cancelled by user]")
             self.print_history(format_error_message("Operation cancelled."))
         except Exception as e:
@@ -827,7 +830,7 @@ Input:
             self.print_history(Text("nano-cli", style="bold cyan"))
             self.print_history(
                 Text(
-                    "Type your message. /help for commands. Ctrl+C to cancel. Ctrl+D to exit.",
+                    "Type your message. /help for commands. Esc to cancel. Ctrl+D to exit.",
                     style="dim",
                 )
             )
