@@ -1,76 +1,14 @@
-"""Edit tool for file modifications with preview confirmation."""
+"""Edit tool for file modifications with preview and permission prompt."""
 
 from __future__ import annotations
 
-import time
-import uuid
-from dataclasses import dataclass
+from collections.abc import Awaitable, Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
 
 from ..data_structures import TextContent
 from .base import Desc, Tool
-
-# =============================================================================
-# Module-level state for Edit tool confirmation workflow
-# =============================================================================
-
-
-@dataclass
-class PendingEdit:
-    """Stores a pending edit awaiting confirmation."""
-
-    file_path: str
-    old_string: str
-    new_string: str
-    match_line: int
-    context_before: list[str]  # Lines before match
-    context_after: list[str]  # Lines after match
-    created_at: float
-    replace_all: bool = False
-    match_count: int = 1
-
-
-# Global dict to store pending edits by edit_id
-_pending_edits: dict[str, PendingEdit] = {}
-
-# Expiry time for pending edits (5 minutes)
-_EDIT_EXPIRY_SECONDS = 300
-
-
-def get_pending_edit(edit_id: str) -> PendingEdit | None:
-    """Get a pending edit by ID for display purposes.
-
-    Cleans up expired edits before returning.
-
-    Args:
-        edit_id: The edit ID to look up.
-
-    Returns:
-        The PendingEdit if found and not expired, None otherwise.
-    """
-    # Cleanup expired edits first
-    current_time = time.time()
-    expired = [
-        k
-        for k, v in _pending_edits.items()
-        if current_time - v.created_at > _EDIT_EXPIRY_SECONDS
-    ]
-    for k in expired:
-        del _pending_edits[k]
-    return _pending_edits.get(edit_id)
-
-
-def _cleanup_expired_edits() -> None:
-    """Remove expired pending edits."""
-    current_time = time.time()
-    expired = [
-        edit_id
-        for edit_id, edit in _pending_edits.items()
-        if current_time - edit.created_at > _EDIT_EXPIRY_SECONDS
-    ]
-    for edit_id in expired:
-        del _pending_edits[edit_id]
 
 
 def _find_match_line(content: str, old_string: str) -> tuple[int, int]:
@@ -154,49 +92,37 @@ class EditInput:
     ] = False
 
 
-@dataclass
-class EditConfirmInput:
-    """Input for EditConfirmTool."""
-
-    edit_id: Annotated[str, Desc("The edit ID from preview to confirm or reject")]
-
-
 # =============================================================================
 # Tool Classes
 # =============================================================================
 
+# Type alias for permission callback
+PermissionCallback = Callable[[str, str, int], Awaitable[bool]]
+
 
 @dataclass
 class EditTool(Tool):
-    """Performs exact string replacements in files with two-step confirmation.
+    """Performs exact string replacements in files with permission prompt.
 
-    This tool uses a preview → confirm workflow to prevent hallucination:
-    1. Step 1 (Preview): Returns a diff preview, stores pending edit
-    2. Step 2 (Confirm): Use EditConfirmTool to apply or reject
-
-    This ensures the agent sees actual file content before changes are made.
+    Shows a preview and asks for user permission before applying changes.
+    If no permission_callback is provided, edits are auto-approved (non-interactive).
     """
 
     name: str = "Edit"
-    description: str = """Performs exact string replacements in files with preview confirmation.
+    description: str = """Performs exact string replacements in files.
 
 Usage:
 - You must use your Read tool at least once in the conversation before editing.
-- Returns a PREVIEW of changes - edit is NOT applied immediately.
-- After reviewing preview, call EditConfirm(edit_id="...") to apply.
+- Shows a preview and asks for user permission before applying.
 - The edit will FAIL if old_string is not unique in the file (unless replace_all=True).
-- Use replace_all=True for replacing all occurrences across the file.
+- Use replace_all=True for replacing all occurrences across the file."""
 
-Workflow:
-1. Call Edit(file_path, old_string, new_string) → Returns preview with edit_id
-2. Review the preview to verify it matches expectations
-3. Call EditConfirm(edit_id="...") to apply, or let it expire to reject"""
+    # Optional callback for interactive permission prompts
+    # Signature: async (file_path, preview, match_count) -> bool
+    permission_callback: PermissionCallback | None = field(default=None, repr=False)
 
     async def __call__(self, input: EditInput) -> TextContent:
-        """Generate edit preview and store pending edit for confirmation."""
-        # Cleanup expired edits first
-        _cleanup_expired_edits()
-
+        """Validate edit, show preview, ask permission, and apply if approved."""
         path = Path(input.file_path)
 
         # Validate file exists
@@ -242,25 +168,11 @@ Workflow:
         lines = content.splitlines()
         match_line, _ = _find_match_line(content, input.old_string)
 
-        preview, context_before, context_after = _generate_preview(
+        preview, _, _ = _generate_preview(
             lines, match_line, input.old_string, input.new_string
         )
 
-        # Generate unique edit_id and store pending edit
-        edit_id = str(uuid.uuid4())[:8]
-        _pending_edits[edit_id] = PendingEdit(
-            file_path=input.file_path,
-            old_string=input.old_string,
-            new_string=input.new_string,
-            match_line=match_line,
-            context_before=context_before,
-            context_after=context_after,
-            created_at=time.time(),
-            replace_all=input.replace_all,
-            match_count=match_count,
-        )
-
-        # Build output
+        # Build preview header
         header = f"─── Edit Preview: {input.file_path} ───\n"
         if match_count > 1:
             header += f"Replacing ALL {match_count} occurrences\n"
@@ -268,95 +180,37 @@ Workflow:
             header += f"Match found at line {match_line + 1}\n"
         header += "\n"
 
-        footer = (
-            f'\n\n⚠️ Edit NOT applied. Call EditConfirm(edit_id="{edit_id}") to apply if the edit matches what you want. Otherwise, ignore it.\n'
-            f"Edit expires in {_EDIT_EXPIRY_SECONDS // 60} minutes."
-        )
+        full_preview = header + preview
 
-        return TextContent(text=header + preview + footer)
-
-
-@dataclass
-class EditConfirmTool(Tool):
-    """Confirms and applies a pending edit from EditTool.
-
-    This is the second step in the two-step edit confirmation workflow.
-    Use the edit_id from the EditTool preview to apply the edit.
-    """
-
-    name: str = "EditConfirm"
-    description: str = """Confirms and applies a pending edit from EditTool.
-
-Usage:
-- Provide the edit_id from the Edit tool preview
-- The edit will be applied to the file
-- If the edit_id is invalid or expired, an error is returned
-
-Example:
-  EditConfirm(edit_id="abc12345")"""
-
-    async def __call__(self, input: EditConfirmInput) -> TextContent:
-        """Apply a pending edit by its ID."""
-        _cleanup_expired_edits()
-
-        edit_id = input.edit_id
-
-        if edit_id not in _pending_edits:
-            return TextContent(
-                text=f"Error: Edit ID '{edit_id}' not found or expired.\n\n"
-                "Pending edits expire after 5 minutes. "
-                "Use the Edit tool again to create a new preview."
+        # Ask for permission if callback provided
+        if self.permission_callback:
+            allowed = await self.permission_callback(
+                input.file_path, full_preview, match_count
             )
-
-        pending = _pending_edits[edit_id]
-        path = Path(pending.file_path)
-
-        # Re-validate file exists
-        if not path.exists():
-            del _pending_edits[edit_id]
-            return TextContent(
-                text=f"Error: File no longer exists: {pending.file_path}"
-            )
-
-        try:
-            content = path.read_text()
-        except (PermissionError, UnicodeDecodeError) as e:
-            del _pending_edits[edit_id]
-            return TextContent(text=f"Error reading file: {e}")
-
-        # Validate old_string still exists
-        if pending.old_string not in content:
-            del _pending_edits[edit_id]
-            return TextContent(
-                text=f"Error: The file has been modified since preview.\n"
-                "The old_string no longer exists. Use Edit tool again."
-            )
+            if not allowed:
+                return TextContent(text="Edit rejected by user.")
 
         # Apply the edit
-        if pending.replace_all:
-            new_content = content.replace(pending.old_string, pending.new_string)
+        if input.replace_all:
+            new_content = content.replace(input.old_string, input.new_string)
         else:
-            new_content = content.replace(pending.old_string, pending.new_string, 1)
+            new_content = content.replace(input.old_string, input.new_string, 1)
 
         try:
             path.write_text(new_content)
         except PermissionError:
-            del _pending_edits[edit_id]
-            return TextContent(text=f"Error: Permission denied: {pending.file_path}")
+            return TextContent(text=f"Error: Permission denied: {input.file_path}")
         except Exception as e:
-            del _pending_edits[edit_id]
             return TextContent(text=f"Error writing file: {e}")
 
-        # Cleanup and confirm
-        del _pending_edits[edit_id]
-
-        if pending.replace_all and pending.match_count > 1:
+        # Return success message
+        if input.replace_all and match_count > 1:
             return TextContent(
-                text=f"✓ Edit applied: {pending.file_path}\n"
-                f"  Replaced {pending.match_count} occurrences."
+                text=f"✓ Edit applied: {input.file_path}\n"
+                f"  Replaced {match_count} occurrences."
             )
         else:
             return TextContent(
-                text=f"✓ Edit applied: {pending.file_path}\n"
-                f"  Modified at line {pending.match_line + 1}."
+                text=f"✓ Edit applied: {input.file_path}\n"
+                f"  Modified at line {match_line + 1}."
             )

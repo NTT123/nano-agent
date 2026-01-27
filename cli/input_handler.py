@@ -1,16 +1,14 @@
-"""Raw terminal input handling for escape key detection.
+"""Input handling using prompt_toolkit.
 
-This module provides a simple InputHandler that:
-- Puts the terminal in cbreak mode during async operations
-- Detects the Escape key (distinguishing it from arrow key sequences)
-- Restores terminal state reliably on exit
-
-The handler is designed to be used as an async context manager during
-agent execution, allowing users to press Escape to cancel operations.
+This module provides escape key detection during async operations using
+prompt_toolkit's input system, which handles all the terminal complexity:
+- Terminal raw mode management
+- Escape sequence parsing (distinguishes ESC from arrow keys)
+- Cross-platform support
 
 Example:
     handler = InputHandler(on_escape=lambda: cancel_token.cancel())
-    
+
     async with handler:
         # During this block, Escape key is detected
         await some_long_operation()
@@ -19,36 +17,27 @@ Example:
 from __future__ import annotations
 
 import asyncio
-import select
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import TYPE_CHECKING, Any, Callable, Generator
 
-# Only import termios/tty on Unix systems
-try:
-    import termios
-    import tty
+from prompt_toolkit.input import create_input
+from prompt_toolkit.input.vt100 import Vt100Input
+from prompt_toolkit.keys import Keys
 
-    HAS_TERMIOS = True
-except ImportError:
-    HAS_TERMIOS = False
-
-# Timeout to distinguish standalone Escape from escape sequences (arrow keys, etc.)
-# Arrow keys send: ESC [ A/B/C/D - we wait this long after ESC to see if more comes
-ESCAPE_SEQUENCE_TIMEOUT = 0.025  # 25ms
+if TYPE_CHECKING:
+    from prompt_toolkit.input import Input
 
 
 @dataclass
 class InputHandler:
-    """Handles raw terminal input for escape key detection.
+    """Handles escape key detection during async operations.
 
-    This class provides escape key detection during async operations.
-    It uses terminal cbreak mode to read individual keypresses without
-    waiting for Enter.
-
-    The handler distinguishes between:
-    - Standalone Escape key (triggers on_escape callback)
-    - Escape sequences like arrow keys (ignored)
+    Uses prompt_toolkit's input system which properly handles:
+    - Terminal raw mode
+    - Escape sequence parsing (arrows, function keys, etc.)
+    - Cross-platform support
 
     Usage:
         handler = InputHandler(on_escape=my_callback)
@@ -56,7 +45,7 @@ class InputHandler:
         async with handler:
             # Escape key detection active
             await long_running_operation()
-        # Terminal restored to normal
+        # Terminal restored automatically
 
     Attributes:
         on_escape: Callback invoked when Escape key is pressed.
@@ -65,10 +54,11 @@ class InputHandler:
 
     on_escape: Callable[[], None] | None = None
 
-    _original_termios: list | None = field(default=None, init=False, repr=False)
+    _input: Input | None = field(default=None, init=False, repr=False)
     _running: bool = field(default=False, init=False, repr=False)
-    _task: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
-    _paused: bool = field(default=False, init=False, repr=False)  # Pause listener for prompts
+    _prompting: bool = field(default=False, init=False, repr=False)
+    _raw_mode_ctx: Any = field(default=None, init=False, repr=False)
+    _attach_ctx: Any = field(default=None, init=False, repr=False)
 
     def _is_tty(self) -> bool:
         """Check if stdin is a real terminal."""
@@ -77,234 +67,126 @@ class InputHandler:
         except Exception:
             return False
 
-    def _enter_cbreak_mode(self) -> bool:
-        """Put terminal in cbreak mode, saving original settings.
-
-        Cbreak mode allows reading individual characters without waiting
-        for Enter, while still allowing Ctrl+C for emergency exit.
-
-        Returns:
-            True if successful, False if not possible (not a TTY, etc.)
-        """
-        if not HAS_TERMIOS or not self._is_tty():
-            return False
-
-        try:
-            fd = sys.stdin.fileno()
-            self._original_termios = termios.tcgetattr(fd)
-            tty.setcbreak(fd)
-            return True
-        except (termios.error, OSError):
-            return False
-
-    def _restore_terminal(self) -> None:
-        """Restore original terminal settings.
-
-        Safe to call multiple times or when no settings were saved.
-        """
-        if not HAS_TERMIOS or self._original_termios is None:
+    def _on_input_ready(self) -> None:
+        """Called by prompt_toolkit when input is available."""
+        if not self._input or not self._running:
             return
 
-        try:
-            fd = sys.stdin.fileno()
-            termios.tcsetattr(fd, termios.TCSADRAIN, self._original_termios)
-        except (termios.error, OSError):
-            pass  # Best effort - terminal might be gone
-        finally:
-            self._original_termios = None
+        # Don't consume input if prompt_yn() is active
+        if self._prompting:
+            return
 
-    async def _listener_loop(self) -> None:
-        """Background task that listens for Escape key.
+        # Force flush the parser to reduce escape sequence disambiguation delay
+        if isinstance(self._input, Vt100Input) and hasattr(self._input, "vt100_parser"):
+            self._input.vt100_parser.flush()
 
-        Uses select() to poll stdin without blocking the event loop.
-        Distinguishes Escape from escape sequences by timing.
-        """
-        fd = sys.stdin.fileno()
+        for key_press in self._input.read_keys():
+            if key_press.key == Keys.Escape and self.on_escape:
+                self.on_escape()
 
-        while self._running:
-            # If paused (for prompt_yn), just sleep and continue
-            if self._paused:
-                await asyncio.sleep(0.01)
-                continue
+    async def prompt_yn(self, prompt: str = "") -> bool | None:
+        """Prompt for yes/no/escape using single character input.
 
-            # Poll stdin with short timeout (allows clean shutdown)
-            try:
-                readable, _, _ = select.select([fd], [], [], 0.05)
-            except (ValueError, OSError):
-                # fd closed or invalid
-                break
-
-            if not readable:
-                # No input, yield control to event loop
-                await asyncio.sleep(0.01)
-                continue
-
-            # Read the character
-            try:
-                char = sys.stdin.read(1)
-            except (OSError, IOError):
-                break
-
-            if char == "\x1b":  # ESC character
-                # Wait briefly to see if this is an escape sequence
-                try:
-                    more_readable, _, _ = select.select(
-                        [fd], [], [], ESCAPE_SEQUENCE_TIMEOUT
-                    )
-                except (ValueError, OSError):
-                    break
-
-                if more_readable:
-                    # More characters coming - it's an escape sequence (arrow key, etc.)
-                    # Consume the rest of the sequence
-                    try:
-                        next_char = sys.stdin.read(1)
-                        if next_char == "[":
-                            # CSI sequence (arrows, function keys)
-                            # Read until we get a letter (the final character)
-                            while True:
-                                seq_char = sys.stdin.read(1)
-                                if seq_char.isalpha() or seq_char == "~":
-                                    break
-                    except (OSError, IOError):
-                        pass
-                    continue
-
-                # No more characters - it's a standalone Escape
-                if self.on_escape:
-                    self.on_escape()
-
-            # Yield control back to event loop
-            await asyncio.sleep(0)
-
-    async def prompt_yn(self, prompt: str = "Continue? [y/n/Esc]: ") -> bool | None:
-        """Prompt for yes/no/escape input using single character read.
-
-        This method temporarily pauses the escape listener and reads a single
-        character from stdin. It's designed to be used for permission prompts
-        during agent execution.
+        This method reads single characters to get y/n/Escape input.
+        It's designed for permission prompts during agent execution.
 
         Args:
-            prompt: The prompt message to display (caller should print this).
-                   This is just for documentation - caller handles display.
+            prompt: The prompt message (caller should print this before calling).
 
         Returns:
             True if user pressed 'y' or 'Y'
             False if user pressed 'n' or 'N'
             None if user pressed Escape (caller should handle as cancel)
-
-        Raises:
-            RuntimeError: If called when handler is not running or no TTY.
-
-        Note:
-            The caller is responsible for printing the prompt before calling
-            this method, and for handling the None (escape) case appropriately.
         """
-        if not self._running:
-            raise RuntimeError("InputHandler is not running")
-
-        if not HAS_TERMIOS or not self._is_tty():
-            # Fallback to regular input for non-TTY
+        if not self._running or not self._input:
+            # Fallback for non-TTY
             try:
                 response = input(prompt).strip().lower()
                 return response in ("y", "yes")
             except (EOFError, KeyboardInterrupt):
                 return None
 
-        # Pause the listener loop so we can read stdin directly
-        self._paused = True
+        # Pause callback-based input processing while prompting
+        self._prompting = True
         try:
-            fd = sys.stdin.fileno()
-
             while True:
-                # Wait for input with timeout (allows cancellation check)
-                try:
-                    readable, _, _ = select.select([fd], [], [], 0.1)
-                except (ValueError, OSError):
-                    return None
+                # Brief sleep to yield to event loop and allow input to arrive
+                await asyncio.sleep(0.02)  # 20ms for faster response
 
-                if not readable:
-                    # Yield to event loop
-                    await asyncio.sleep(0.01)
-                    continue
+                # Force flush to reduce escape sequence disambiguation delay
+                if isinstance(self._input, Vt100Input) and hasattr(self._input, "vt100_parser"):
+                    self._input.vt100_parser.flush()
 
-                # Read single character
-                try:
-                    char = sys.stdin.read(1)
-                except (OSError, IOError):
-                    return None
-
-                # Check for Escape
-                if char == "\x1b":
-                    # Wait briefly to distinguish from escape sequences
-                    try:
-                        more, _, _ = select.select([fd], [], [], ESCAPE_SEQUENCE_TIMEOUT)
-                    except (ValueError, OSError):
+                for key_press in self._input.read_keys():
+                    if key_press.key == Keys.Escape:
                         return None
-
-                    if more:
-                        # It's an escape sequence (arrow key, etc.) - consume and ignore
-                        try:
-                            next_char = sys.stdin.read(1)
-                            if next_char == "[":
-                                while True:
-                                    seq_char = sys.stdin.read(1)
-                                    if seq_char.isalpha() or seq_char == "~":
-                                        break
-                        except (OSError, IOError):
-                            pass
-                        continue  # Keep waiting for valid input
-
-                    # Standalone Escape - return None to indicate cancel
-                    return None
-
-                # Check for y/n
-                if char.lower() == "y":
-                    return True
-                elif char.lower() == "n":
-                    return False
-
-                # Ignore other characters, keep waiting
+                    # key_press.data contains the actual character for regular keys
+                    char = key_press.data.lower() if key_press.data else ""
+                    if char == "y":
+                        return True
+                    elif char == "n":
+                        return False
+                    # Ignore other keys, keep waiting
         finally:
-            self._paused = False
+            self._prompting = False
 
     async def start(self) -> bool:
         """Start listening for escape key.
 
         Returns:
-            True if started successfully, False if not possible.
+            True if started successfully, False if not possible (not a TTY, etc.)
         """
         if self._running:
             return True
 
-        if not self._enter_cbreak_mode():
+        if not self._is_tty():
             return False
 
-        self._running = True
-        self._task = asyncio.create_task(self._listener_loop())
-        return True
+        try:
+            self._input = create_input()
+            self._raw_mode_ctx = self._input.raw_mode()
+            self._raw_mode_ctx.__enter__()
+            self._attach_ctx = self._input.attach(self._on_input_ready)
+            self._attach_ctx.__enter__()
+            self._running = True
+            return True
+        except Exception:
+            self._cleanup()
+            return False
 
     async def stop(self) -> None:
         """Stop listening and restore terminal."""
         self._running = False
+        self._cleanup()
 
-        if self._task:
-            self._task.cancel()
+    def _cleanup(self) -> None:
+        """Clean up contexts in reverse order."""
+        if self._attach_ctx:
             try:
-                await self._task
-            except asyncio.CancelledError:
+                self._attach_ctx.__exit__(None, None, None)
+            except Exception:
                 pass
-            self._task = None
+            self._attach_ctx = None
 
-        self._restore_terminal()
+        if self._raw_mode_ctx:
+            try:
+                self._raw_mode_ctx.__exit__(None, None, None)
+            except Exception:
+                pass
+            self._raw_mode_ctx = None
+
+        if self._input:
+            try:
+                self._input.close()
+            except Exception:
+                pass
+            self._input = None
 
     async def __aenter__(self) -> "InputHandler":
         """Async context manager entry - starts listening."""
         await self.start()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:
+    async def __aexit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> None:
         """Async context manager exit - always restores terminal."""
         await self.stop()
-        # Don't suppress exceptions
-        return None

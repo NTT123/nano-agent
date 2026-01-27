@@ -1,19 +1,22 @@
-"""Simple Rich-based TUI application for nano-agent.
+"""Message-list based TUI application for nano-agent.
 
-This module provides a minimal terminal app that uses:
-- Rich Console.print() for all output (history and responses)
-- Rich Live for spinner while waiting for API response
-- prompt_toolkit for input handling with history navigation
+This module provides a terminal app with a message-list architecture:
+- The UI is a sequential list of messages (source of truth for rendering)
+- Each message owns its output buffer (can only modify its own section)
+- The last message has exclusive control over input events
+- Re-rendering is deterministic: clear screen -> render all messages in order
 
 Architecture:
-    Terminal Scrollback (all output via Console.print())
-    ├── User message 1
-    ├── Assistant response 1 (thinking + text)
-    ├── Tool calls and results
-    └── ... (grows infinitely, terminal handles)
-
-    Transient Spinner (Rich Live, removed after response)
-    └── "Thinking..." indicator during API call
+    MessageList (source of truth for UI)
+    ├── WelcomeMessage (frozen)
+    ├── UserMessage (frozen)
+    ├── AssistantMessage (frozen)
+    │   ├── thinking content
+    │   ├── text response
+    │   └── token count
+    ├── ToolCallMessage (frozen)
+    ├── ToolResultMessage (frozen)
+    └── ActiveMessage (can re-render, has input control)
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from typing import Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.history import FileHistory
+from prompt_toolkit.input.vt100 import Vt100Input
 from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
 from prompt_toolkit.keys import Keys
 from prompt_toolkit.styles import Style
@@ -45,6 +49,7 @@ from nano_agent import (
     ClaudeCodeAPI,
     GeminiAPI,
     Message,
+    Response,
     Role,
     TextContent,
     ThinkingContent,
@@ -53,12 +58,9 @@ from nano_agent import (
 )
 from nano_agent.api_base import APIError
 from nano_agent.cancellation import CancellationToken
-
-from .input_handler import InputHandler
 from nano_agent.capture_claude_code_auth import get_config
 from nano_agent.tools import (
     BashTool,
-    EditConfirmTool,
     EditTool,
     GlobTool,
     GrepTool,
@@ -68,7 +70,6 @@ from nano_agent.tools import (
     Tool,
     WebFetchTool,
     WriteTool,
-    get_pending_edit,
 )
 
 from .display import (
@@ -82,6 +83,21 @@ from .display import (
     format_tool_result,
     format_user_message,
 )
+from .input_handler import InputHandler
+from .message_factory import (
+    add_text_to_assistant,
+    add_thinking_to_assistant,
+    create_assistant_message,
+    create_error_message,
+    create_permission_message,
+    create_system_message,
+    create_tool_call_message,
+    create_tool_result_message,
+    create_user_message,
+    create_welcome_message,
+)
+from .message_list import MessageList
+from .messages import UIMessage
 
 # Auto-save session file in current directory
 SESSION_FILE = ".nano-cli-session.json"
@@ -89,7 +105,7 @@ SESSION_FILE = ".nano-cli-session.json"
 
 def build_system_prompt(model: str) -> tuple[str, bool]:
     """Build system prompt with dynamic context.
-    
+
     Returns:
         A tuple of (system_prompt, claude_md_loaded) where claude_md_loaded
         indicates if CLAUDE.md was found and included in the prompt.
@@ -105,7 +121,7 @@ def build_system_prompt(model: str) -> tuple[str, bool]:
 - Working directory: {cwd}
 - Current time: {now}
 
-**Important**: Always use Edit/EditConfirm for file modifications. Do not use Bash for file editing (e.g., echo >, sed -i, etc.).
+**Important**: Always use Edit for file modifications. Do not use Bash for file editing (e.g., echo >, sed -i, etc.).
 
 Be concise but helpful. When using tools, explain briefly what you're doing."""
 
@@ -128,10 +144,11 @@ Be concise but helpful. When using tools, explain briefly what you're doing."""
 
 @dataclass
 class TerminalApp:
-    """Simple Rich-based terminal app for nano-agent.
+    """Message-list based terminal app for nano-agent.
 
-    Uses Rich Console for printing to history (terminal scrollback)
-    and Rich Live for dynamic status/response display.
+    Uses a MessageList as the source of truth for UI rendering.
+    Each message owns its output buffer, and only the last (active)
+    message can receive input events.
     """
 
     # soft_wrap=True: Let terminal handle line wrapping naturally
@@ -155,6 +172,8 @@ class TerminalApp:
     # Cancellation support
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
     input_handler: InputHandler = field(default=None, init=False)  # type: ignore
+    # Message list for UI rendering
+    message_list: MessageList = field(default_factory=MessageList)
 
     def __post_init__(self) -> None:
         """Initialize tools after dataclass creation."""
@@ -163,8 +182,7 @@ class TerminalApp:
                 BashTool(),
                 ReadTool(),
                 WriteTool(),
-                EditTool(),
-                EditConfirmTool(),
+                EditTool(permission_callback=self._edit_permission_callback),
                 GlobTool(),
                 GrepTool(),
                 TodoWriteTool(),
@@ -180,8 +198,25 @@ class TerminalApp:
         """Called when Escape key is pressed during agent execution."""
         self.cancel_token.cancel()
 
+    def add_message(self, msg: UIMessage) -> UIMessage:
+        """Add a message to the list and render it.
+
+        Args:
+            msg: The message to add
+
+        Returns:
+            The added message
+        """
+        self.message_list.add(msg)
+        self.message_list.render_message(msg, self.console)
+        return msg
+
     def print_history(self, content: Text | Panel | RenderableType | str) -> None:
-        """Print content to history (scrolls into terminal scrollback)."""
+        """Print content to history (scrolls into terminal scrollback).
+
+        This is a legacy method for compatibility. Prefer using add_message()
+        with UIMessage instances for new code.
+        """
         self.console.print(content)
 
     def print_blank(self) -> None:
@@ -190,7 +225,7 @@ class TerminalApp:
 
     def _auto_save(self) -> None:
         """Automatically save the conversation to the session file.
-        
+
         Saves silently to SESSION_FILE in the current directory after each
         conversation turn. Errors are ignored to not interrupt the user.
         """
@@ -203,52 +238,16 @@ class TerminalApp:
             # Silently ignore save errors to not interrupt the user
             pass
 
-    def _auto_load(self) -> bool:
-        """Automatically load conversation from session file if it exists.
-        
-        Returns:
-            True if a session was loaded, False otherwise.
-        """
-        filepath = Path.cwd() / SESSION_FILE
-        if not filepath.exists():
-            return False
-        
-        try:
-            loaded_dag, metadata = DAG.load(filepath)
-            # Restore tools to the loaded DAG
-            if self.tools:
-                loaded_dag = loaded_dag.tools(*self.tools)
-            self.dag = loaded_dag
-            session_id = metadata.get("session_id", "unknown")
-            node_count = len(metadata.get("nodes", {}))
-            # Render the loaded session history
-            self.render_history()
-            self.print_history(
-                format_system_message(
-                    f"Resumed session from: {filepath}\n"
-                    f"  Session ID: {session_id}\n"
-                    f"  Nodes: {node_count}"
-                )
-            )
-            return True
-        except Exception as e:
-            self.print_history(
-                format_system_message(f"Could not load previous session: {e}")
-            )
-            return False
+    def _rebuild_message_list_from_dag(self) -> None:
+        """Rebuild the message list from the DAG.
 
-    def render_history(self) -> None:
-        """Re-render all messages from the DAG.
-
-        This clears the console and re-displays all user messages, assistant
-        responses (including thinking), tool calls, and tool results from the
-        current DAG. Useful after loading a session or when terminal is resized.
+        This reconstructs the message list by iterating through the DAG
+        and creating UIMessage instances for each node.
         """
+        self.message_list.clear()
+
         if not self.dag or not self.dag._heads:
-            self.print_history(format_system_message("No conversation history to render."))
             return
-
-        self.console.clear()
 
         # Iterate through all nodes in causal order (parents before children)
         for node in self.dag.head.ancestors():
@@ -256,7 +255,7 @@ class TerminalApp:
                 if node.data.role == Role.USER:
                     # User message - can be string or list of content blocks
                     if isinstance(node.data.content, str):
-                        self.print_history(format_user_message(node.data.content))
+                        self.message_list.add(create_user_message(node.data.content))
                     else:
                         # Check what type of content blocks we have
                         text_parts = []
@@ -267,11 +266,13 @@ class TerminalApp:
                             elif isinstance(block, ToolResultContent):
                                 tool_results.append(block)
 
-                        # Render text content as user message
+                        # Create user message for text content
                         if text_parts:
-                            self.print_history(format_user_message("\n".join(text_parts)))
+                            self.message_list.add(
+                                create_user_message("\n".join(text_parts))
+                            )
 
-                        # Render tool results
+                        # Create tool result messages
                         for tool_result in tool_results:
                             if isinstance(tool_result.content, str):
                                 result_text = tool_result.content
@@ -281,14 +282,24 @@ class TerminalApp:
                                     if isinstance(content_block, TextContent):
                                         result_parts.append(content_block.text)
                                 result_text = "\n".join(result_parts)
-                            is_error = tool_result.is_error if hasattr(tool_result, "is_error") else False
-                            self.print_history(format_tool_result(result_text, is_error=is_error))
+                            is_error = (
+                                tool_result.is_error
+                                if hasattr(tool_result, "is_error")
+                                else False
+                            )
+                            self.message_list.add(
+                                create_tool_result_message(
+                                    result_text, is_error=is_error
+                                )
+                            )
 
                 elif node.data.role == Role.ASSISTANT:
                     # Assistant message - may have thinking and text content
                     if isinstance(node.data.content, str):
                         if node.data.content.strip():
-                            self.print_history(format_assistant_message(node.data.content))
+                            msg = create_assistant_message()
+                            add_text_to_assistant(msg, node.data.content)
+                            self.message_list.add(msg)
                     else:
                         # Process content blocks
                         thinking_blocks = []
@@ -305,23 +316,42 @@ class TerminalApp:
                             elif isinstance(block, ToolUseContent):
                                 tool_uses.append(block)
 
-                        # Display thinking content
-                        for thinking in thinking_blocks:
-                            self.print_history(format_thinking_message(thinking))
+                        # Create assistant message with thinking and text
+                        if thinking_blocks or text_parts:
+                            msg = create_assistant_message()
+                            for thinking in thinking_blocks:
+                                add_thinking_to_assistant(msg, thinking)
+                            if text_parts:
+                                add_text_to_assistant(
+                                    msg,
+                                    "\n".join(text_parts),
+                                    has_thinking=bool(thinking_blocks),
+                                )
+                            self.message_list.add(msg)
 
-                        # Display text content with separator if there was thinking
-                        if text_parts:
-                            if thinking_blocks:
-                                self.print_history(format_thinking_separator())
-                            self.print_history(format_assistant_message("\n".join(text_parts)))
-
-                        # Display tool calls
+                        # Create tool call messages
                         for tool_use in tool_uses:
-                            self.print_history(
-                                format_tool_call(tool_use.name, tool_use.input or {})
+                            self.message_list.add(
+                                create_tool_call_message(
+                                    tool_use.name, tool_use.input or {}
+                                )
                             )
 
-        self.print_history(format_system_message("History rendered."))
+    def render_history(self) -> None:
+        """Re-render all messages from the DAG.
+
+        This rebuilds the message list from the DAG and performs a full redraw.
+        Useful after loading a session or when terminal is resized.
+        """
+        if not self.dag or not self.dag._heads:
+            self.add_message(
+                create_system_message("No conversation history to render.")
+            )
+            return
+
+        self._rebuild_message_list_from_dag()
+        self.message_list.full_redraw(self.console)
+        self.add_message(create_system_message("History rendered."))
 
     async def initialize_api(self) -> bool:
         """Initialize the API client (ClaudeCodeAPI or GeminiAPI).
@@ -336,38 +366,38 @@ class TerminalApp:
 
     async def _initialize_claude_api(self) -> bool:
         """Initialize Claude Code API client."""
-        self.print_history(format_system_message("Connecting to Claude Code API..."))
+        self.add_message(create_system_message("Connecting to Claude Code API..."))
 
         try:
             try:
                 self.api = ClaudeCodeAPI()
             except ValueError:
                 # No saved config - capture credentials first
-                self.print_history(
-                    format_system_message("No saved credentials, capturing from Claude CLI...")
+                self.add_message(
+                    create_system_message(
+                        "No saved credentials, capturing from Claude CLI..."
+                    )
                 )
                 if not await self._refresh_token():
                     return False
 
-            # Validate token with warm-up (refreshes if needed)
-            if not await self._warmup_and_validate_token():
-                return False
-
-            # Token is valid, set up main DAG
+            # Set up main DAG
             model = self.api.model
             system_prompt, claude_md_loaded = build_system_prompt(model)
             self.dag = DAG().system(system_prompt).tools(*self.tools)
 
-            self.print_history(format_system_message(f"Connected using {model}"))
+            self.add_message(create_system_message(f"Connected using {model}"))
             if claude_md_loaded:
-                self.print_history(format_system_message("Loaded CLAUDE.md into system prompt"))
+                self.add_message(
+                    create_system_message("Loaded CLAUDE.md into system prompt")
+                )
             self.print_blank()
             return True
 
         except RuntimeError as e:
-            self.print_history(format_error_message(str(e)))
-            self.print_history(
-                format_system_message(
+            self.add_message(create_error_message(str(e)))
+            self.add_message(
+                create_system_message(
                     "Claude CLI must be running to capture authentication."
                 )
             )
@@ -375,7 +405,7 @@ class TerminalApp:
 
     async def _initialize_gemini_api(self) -> bool:
         """Initialize Gemini API client."""
-        self.print_history(format_system_message("Connecting to Gemini API..."))
+        self.add_message(create_system_message("Connecting to Gemini API..."))
 
         try:
             self.api = GeminiAPI(
@@ -386,65 +416,22 @@ class TerminalApp:
             model = self.api.model
             system_prompt, claude_md_loaded = build_system_prompt(model)
             self.dag = DAG().system(system_prompt).tools(*self.tools)
-            self.print_history(format_system_message(f"Connected using {model}"))
+            self.add_message(create_system_message(f"Connected using {model}"))
             if claude_md_loaded:
-                self.print_history(format_system_message("Loaded CLAUDE.md into system prompt"))
+                self.add_message(
+                    create_system_message("Loaded CLAUDE.md into system prompt")
+                )
             self.print_blank()
             return True
 
         except ValueError as e:
-            self.print_history(format_error_message(str(e)))
-            self.print_history(
-                format_system_message(
+            self.add_message(create_error_message(str(e)))
+            self.add_message(
+                create_system_message(
                     "Set GEMINI_API_KEY environment variable to use Gemini."
                 )
             )
             return False
-
-    async def _warmup_and_validate_token(self, max_retries: int = 3) -> bool:
-        """Send warm-up message to validate token, refresh if needed.
-
-        Args:
-            max_retries: Maximum token refresh attempts.
-
-        Returns:
-            True if token is valid (after potential refresh), False if all retries failed.
-        """
-        for attempt in range(max_retries):
-            try:
-                # Create temporary DAG just for warm-up (not self.dag)
-                warmup_dag = DAG().system("You are helpful.").user("hi")
-
-                # Send warm-up request
-                self.print_history(format_system_message("Validating token..."))
-                await self.api.send(warmup_dag)  # type: ignore[union-attr]
-
-                # Success - token is valid
-                self.print_history(format_system_message("Token valid."))
-                return True
-
-            except APIError as e:
-                if e.status_code == 401:
-                    self.print_history(
-                        format_system_message(
-                            f"Token expired (attempt {attempt + 1}/{max_retries}), refreshing..."
-                        )
-                    )
-
-                    # Refresh token
-                    if not await self._refresh_token():
-                        continue  # Refresh failed, try again
-
-                    # Token refreshed, loop will retry warm-up
-                else:
-                    # Non-401 error, propagate
-                    raise
-
-        # All retries exhausted
-        self.print_history(
-            format_error_message("Failed to validate token after all attempts.")
-        )
-        return False
 
     async def _refresh_token(self) -> bool:
         """Refresh OAuth token by capturing from Claude CLI.
@@ -458,16 +445,18 @@ class TerminalApp:
 
             # Re-create API with new token
             self.api = ClaudeCodeAPI()
-            self.print_history(format_system_message("Token refreshed."))
+            self.add_message(create_system_message("Token refreshed."))
             return True
 
         except TimeoutError:
-            self.print_history(
-                format_error_message("Token refresh timed out. Is Claude CLI available?")
+            self.add_message(
+                create_error_message(
+                    "Token refresh timed out. Is Claude CLI available?"
+                )
             )
             return False
         except RuntimeError as e:
-            self.print_history(format_error_message(f"Token refresh failed: {e}"))
+            self.add_message(create_error_message(f"Token refresh failed: {e}"))
             return False
 
     async def get_user_input(self) -> str | None:
@@ -541,21 +530,24 @@ class TerminalApp:
             return False
 
         if cmd == "/clear":
-            # Clear screen and reset conversation
+            # Clear screen, reset conversation, and message list
+            self.message_list.clear()
             self.console.clear()
             claude_md_loaded = False
             if self.dag and self.api:
                 model = self.api.model
                 system_prompt, claude_md_loaded = build_system_prompt(model)
                 self.dag = DAG().system(system_prompt).tools(*self.tools)
-            self.print_history(format_system_message("Conversation reset."))
+            self.add_message(create_system_message("Conversation reset."))
             if claude_md_loaded:
-                self.print_history(format_system_message("Loaded CLAUDE.md into system prompt"))
+                self.add_message(
+                    create_system_message("Loaded CLAUDE.md into system prompt")
+                )
             return True
 
         if cmd == "/render":
-            # Re-render all history (useful after terminal resize)
-            self.render_history()
+            # Re-render all history using message list (useful after terminal resize)
+            self.message_list.full_redraw(self.console)
             return True
 
         if cmd == "/help":
@@ -563,6 +555,7 @@ class TerminalApp:
   /quit, /exit, /q - Exit the application
   /clear - Reset conversation and clear screen
   /continue, /c - Continue agent execution without user message
+  /renew - Refresh OAuth token (use when getting 401 errors)
   /render - Re-render history (useful after terminal resize)
   /debug - Show DAG as JSON
   /save [filename] - Save session to file (default: session.json)
@@ -574,7 +567,7 @@ Input:
   Ctrl+J - Insert new line (for multiline input)
   Esc - Cancel current operation (during execution)
   Ctrl+D - Exit"""
-            self.print_history(format_system_message(help_text))
+            self.add_message(create_system_message(help_text))
             return True
 
         if cmd == "/debug":
@@ -590,7 +583,7 @@ Input:
                 dag_json = json.dumps(graph_data, indent=2, default=str)
                 self.print_history(JSON(dag_json))
             else:
-                self.print_history(format_system_message("No DAG initialized."))
+                self.add_message(create_system_message("No DAG initialized."))
             return True
 
         # /save [filename] - Save the current DAG to a file
@@ -603,13 +596,13 @@ Input:
                 try:
                     filepath = Path(filename).resolve()
                     self.dag.save(filepath, session_id=datetime.now().isoformat())
-                    self.print_history(
-                        format_system_message(f"Session saved to: {filepath}")
+                    self.add_message(
+                        create_system_message(f"Session saved to: {filepath}")
                     )
                 except Exception as e:
-                    self.print_history(format_error_message(f"Failed to save: {e}"))
+                    self.add_message(create_error_message(f"Failed to save: {e}"))
             else:
-                self.print_history(format_system_message("No DAG to save."))
+                self.add_message(create_system_message("No DAG to save."))
             return True
 
         # /load [filename] - Load a DAG from a file
@@ -620,9 +613,7 @@ Input:
                 filename += ".json"
             filepath = Path(filename).resolve()
             if not filepath.exists():
-                self.print_history(
-                    format_error_message(f"File not found: {filepath}")
-                )
+                self.add_message(create_error_message(f"File not found: {filepath}"))
                 return True
             try:
                 loaded_dag, metadata = DAG.load(filepath)
@@ -634,61 +625,40 @@ Input:
                 node_count = len(metadata.get("nodes", {}))
                 # Render the loaded session history
                 self.render_history()
-                self.print_history(
-                    format_system_message(
+                self.add_message(
+                    create_system_message(
                         f"Session loaded from: {filepath}\n"
                         f"  Session ID: {session_id}\n"
                         f"  Nodes: {node_count}"
                     )
                 )
             except Exception as e:
-                self.print_history(format_error_message(f"Failed to load: {e}"))
+                self.add_message(create_error_message(f"Failed to load: {e}"))
             return True
 
-        self.print_history(format_error_message(f"Unknown command: {command}"))
-        self.print_history(format_system_message("Type /help for available commands."))
+        self.add_message(create_error_message(f"Unknown command: {command}"))
+        self.add_message(create_system_message("Type /help for available commands."))
         return True
 
-    async def _permission_callback(
-        self, tool_name: str, tool_input: dict[str, Any]
+    async def _edit_permission_callback(
+        self, file_path: str, preview: str, match_count: int
     ) -> bool:
-        """Interactive permission prompt for EditConfirm.
+        """Permission callback for Edit tool.
 
         Args:
-            tool_name: The name of the tool being called.
-            tool_input: The input parameters for the tool.
+            file_path: The file being edited.
+            preview: The edit preview text.
+            match_count: Number of matches being replaced.
 
         Returns:
-            True if the user allows the operation, False otherwise.
+            True if the user allows the edit, False otherwise.
         """
-        if tool_name != "EditConfirm":
-            return True
-
-        edit_id = tool_input.get("edit_id", "")
-        if not edit_id:
-            return True  # Let tool handle validation error
-
-        pending = get_pending_edit(edit_id)
-        if pending is None:
-            return True  # Let tool handle expired/missing error
-
-        # Display edit details
-        self.print_blank()
-        self.print_history(Text("─── Permission Required ───", style="yellow bold"))
-        self.print_history(Text(f"File: {pending.file_path}", style="cyan"))
-
-        if pending.replace_all and pending.match_count > 1:
-            self.print_history(
-                Text(
-                    f"(Replacing {pending.match_count} occurrences)", style="yellow dim"
-                )
-            )
-
-        self.print_blank()
+        # Create permission message with the preview
+        permission_msg = create_permission_message(file_path, match_count, preview)
+        self.add_message(permission_msg)
 
         # Prompt for confirmation using single-character input
-        # Print prompt (prompt_yn expects caller to handle display)
-        self.console.print("Allow this edit? [y/n/Esc]: ", end="", style="yellow")
+        self.console.print("Allow this edit? (y/n/esc): ", end="", style="yellow")
 
         result = await self.input_handler.prompt_yn()
 
@@ -707,31 +677,17 @@ Input:
         if not self.dag:
             return
 
-        # Check permission for EditConfirm before execution
-        if tool_call.name == "EditConfirm":
-            allowed = await self._permission_callback(
-                tool_call.name, tool_call.input or {}
-            )
-            if not allowed:
-                self.print_history(format_system_message("Edit rejected by user."))
-                error_result = TextContent(
-                    text="Permission denied: User rejected the edit operation. "
-                    "The file was NOT modified."
-                )
-                self.print_history(format_tool_result(error_result.text, is_error=True))
-                self.dag = self.dag.tool_result(
-                    ToolResultContent(
-                        tool_use_id=tool_call.id, content=[error_result], is_error=True
-                    )
-                )
-                return
-
-        self.print_history(format_tool_call(tool_call.name, tool_call.input or {}))
+        # Add tool call message
+        self.add_message(
+            create_tool_call_message(tool_call.name, tool_call.input or {})
+        )
 
         tool = self.tool_map.get(tool_call.name)
         if not tool:
             error_result = TextContent(text=f"Unknown tool: {tool_call.name}")
-            self.print_history(format_tool_result(error_result.text, is_error=True))
+            self.add_message(
+                create_tool_result_message(error_result.text, is_error=True)
+            )
             self.dag = self.dag.tool_result(
                 ToolResultContent(
                     tool_use_id=tool_call.id, content=[error_result], is_error=True
@@ -743,7 +699,7 @@ Input:
             result = await self.cancel_token.run(tool.execute(tool_call.input))
             result_list = result if isinstance(result, list) else [result]
             result_text = "\n".join(r.text for r in result_list)
-            self.print_history(format_tool_result(result_text))
+            self.add_message(create_tool_result_message(result_text))
             self.dag = self.dag.tool_result(
                 ToolResultContent(tool_use_id=tool_call.id, content=result_list)
             )
@@ -751,57 +707,90 @@ Input:
             raise
         except Exception as e:
             error_result = TextContent(text=f"Tool error: {e}")
-            self.print_history(format_tool_result(error_result.text, is_error=True))
+            self.add_message(
+                create_tool_result_message(error_result.text, is_error=True)
+            )
             self.dag = self.dag.tool_result(
                 ToolResultContent(
                     tool_use_id=tool_call.id, content=[error_result], is_error=True
                 )
             )
 
-    def _render_response(self, response: Message) -> None:
-        """Render assistant response (thinking, text, token count)."""
+    def _render_response(self, response: Response) -> UIMessage:
+        """Render assistant response (thinking, text, token count).
+
+        Args:
+            response: The assistant response
+
+        Returns:
+            The created UIMessage for the response
+        """
         # Debug: show raw content blocks
         if self.debug:
-            self.print_history(
-                format_system_message(
+            self.add_message(
+                create_system_message(
                     f"Response blocks: {[type(b).__name__ for b in response.content]}"
                 )
             )
             for block in response.content:
-                self.print_history(format_system_message(f"  {block}"))
+                self.add_message(create_system_message(f"  {block}"))
 
-        # Display thinking content (if any)
+        # Create assistant message
+        msg = create_assistant_message()
+
+        # Add thinking content (if any)
         has_thinking = False
         for thinking in response.get_thinking():
             if thinking.thinking:
-                self.print_history(format_thinking_message(thinking.thinking))
+                add_thinking_to_assistant(msg, thinking.thinking)
                 has_thinking = True
 
-        # Display text content with token count
+        # Add text content with token count
         text_content = response.get_text()
-        if text_content and text_content.strip():
-            if has_thinking:
-                self.print_history(format_thinking_separator())
-            self.print_history(
-                Group(
-                    format_assistant_message(text_content),
-                    format_token_count(
-                        input_tokens=response.usage.input_tokens,
-                        output_tokens=response.usage.output_tokens,
-                        cache_creation_tokens=response.usage.cache_creation_input_tokens,
-                        cache_read_tokens=response.usage.cache_read_input_tokens,
-                    ),
-                )
-            )
-        else:
-            self.print_history(
-                format_token_count(
-                    input_tokens=response.usage.input_tokens,
-                    output_tokens=response.usage.output_tokens,
-                    cache_creation_tokens=response.usage.cache_creation_input_tokens,
-                    cache_read_tokens=response.usage.cache_read_input_tokens,
-                )
-            )
+        add_text_to_assistant(
+            msg,
+            text_content or "",
+            has_thinking=has_thinking,
+            input_tokens=response.usage.input_tokens,
+            output_tokens=response.usage.output_tokens,
+            cache_creation_tokens=response.usage.cache_creation_input_tokens,
+            cache_read_tokens=response.usage.cache_read_input_tokens,
+        )
+
+        # Store metadata
+        msg.metadata["input_tokens"] = response.usage.input_tokens
+        msg.metadata["output_tokens"] = response.usage.output_tokens
+
+        return self.add_message(msg)
+
+    async def _check_for_escape(self) -> None:
+        """Background task to poll for Escape key during API calls.
+
+        prompt_toolkit's escape sequence disambiguation requires polling
+        rather than pure callback-based detection, since the callback
+        fires on raw input but read_keys() may not return the Escape
+        until after the disambiguation timeout.
+        """
+        if not self.input_handler._input or not self.input_handler._running:
+            return
+
+        while not self.cancel_token.is_cancelled:
+            await asyncio.sleep(0.02)  # Poll every 20ms for faster response
+            if not self.input_handler._running:
+                break
+            # Don't consume input if prompt_yn() is active
+            if self.input_handler._prompting:
+                continue
+
+            # Force flush to reduce escape sequence disambiguation delay
+            inp = self.input_handler._input
+            if isinstance(inp, Vt100Input) and hasattr(inp, "vt100_parser"):
+                inp.vt100_parser.flush()
+
+            for key_press in self.input_handler._input.read_keys():
+                if key_press.key == Keys.Escape:
+                    self.cancel_token.cancel()
+                    return
 
     async def _agent_loop(self) -> None:
         """Run agent loop with cancellation support.
@@ -817,14 +806,22 @@ Input:
         # Start input handler to detect Escape key during execution
         async with self.input_handler:
             while True:
-                # API call with spinner
-                with Live(
-                    Spinner("dots", text="Thinking... (Esc to cancel)"),
-                    console=self.console,
-                    refresh_per_second=10,
-                    transient=True,
-                ):
-                    response = await self.cancel_token.run(self.api.send(self.dag))
+                # API call with spinner, polling for Escape in background
+                escape_task = asyncio.create_task(self._check_for_escape())
+                try:
+                    with Live(
+                        Spinner("dots", text="Thinking... (Esc to cancel)"),
+                        console=self.console,
+                        refresh_per_second=10,
+                        transient=True,
+                    ):
+                        response = await self.cancel_token.run(self.api.send(self.dag))
+                finally:
+                    escape_task.cancel()
+                    try:
+                        await escape_task
+                    except asyncio.CancelledError:
+                        pass
 
                 # Update DAG and render response
                 self.dag = self.dag.assistant(response.content)
@@ -846,9 +843,9 @@ Input:
         except (KeyboardInterrupt, asyncio.CancelledError):
             self.cancel_token.cancel()
             self.dag = self.dag.user("[Operation cancelled by user]")
-            self.print_history(format_error_message("Operation cancelled."))
+            self.add_message(create_error_message("Operation cancelled."))
         except Exception as e:
-            self.print_history(format_error_message(f"API error: {e}"))
+            self.add_message(create_error_message(f"API error: {e}"))
 
         self.print_blank()
         self._auto_save()
@@ -856,12 +853,11 @@ Input:
     async def send_message(self, text: str) -> None:
         """Send a user message and handle the response with agent loop."""
         if not self.api or not self.dag:
-            self.print_history(format_error_message("API not initialized"))
+            self.add_message(create_error_message("API not initialized"))
             return
 
         self.cancel_token.reset()
-        self.print_history(format_user_message(text))
-        self.print_blank()
+        self.add_message(create_user_message(text))
         self.dag = self.dag.user(text)
 
         await self._run_agent_with_error_handling()
@@ -873,12 +869,11 @@ Input:
         mid-execution (e.g., due to tool call limits).
         """
         if not self.api or not self.dag:
-            self.print_history(format_error_message("API not initialized"))
+            self.add_message(create_error_message("API not initialized"))
             return
 
         self.cancel_token.reset()
-        self.print_history(format_system_message("Continuing execution..."))
-        self.print_blank()
+        self.add_message(create_system_message("Continuing execution..."))
 
         await self._run_agent_with_error_handling()
 
@@ -890,15 +885,8 @@ Input:
     async def run(self) -> None:
         """Main application loop."""
         try:
-            # Print header
-            self.print_history(Text("nano-cli", style="bold cyan"))
-            self.print_history(
-                Text(
-                    "Type your message. /help for commands. Esc to cancel. Ctrl+D to exit.",
-                    style="dim",
-                )
-            )
-            self.print_blank()
+            # Add welcome message
+            self.add_message(create_welcome_message())
 
             # Initialize API
             if not await self.initialize_api():
@@ -911,8 +899,8 @@ Input:
                     filename += ".json"
                 filepath = Path(filename).resolve()
                 if not filepath.exists():
-                    self.print_history(
-                        format_error_message(f"Session file not found: {filepath}")
+                    self.add_message(
+                        create_error_message(f"Session file not found: {filepath}")
                     )
                 else:
                     try:
@@ -925,18 +913,17 @@ Input:
                         node_count = len(metadata.get("nodes", {}))
                         # Render the loaded session history
                         self.render_history()
-                        self.print_history(
-                            format_system_message(
+                        self.add_message(
+                            create_system_message(
                                 f"Continuing session from: {filepath}\n"
                                 f"  Session ID: {session_id}\n"
                                 f"  Nodes: {node_count}"
                             )
                         )
                     except Exception as e:
-                        self.print_history(format_error_message(f"Failed to load session: {e}"))
-            else:
-                # No --continue specified, try auto-loading from session file
-                self._auto_load()
+                        self.add_message(
+                            create_error_message(f"Failed to load session: {e}")
+                        )
 
             # Main input loop
             while True:
@@ -945,7 +932,7 @@ Input:
                 if user_input is None:
                     # User pressed Ctrl+D
                     self.print_blank()
-                    self.print_history(format_system_message("Goodbye!"))
+                    self.add_message(create_system_message("Goodbye!"))
                     break
 
                 if not user_input:
@@ -957,10 +944,14 @@ Input:
                     await self.continue_agent()
                     continue
 
+                if cmd == "/renew":
+                    await self._refresh_token()
+                    continue
+
                 # Handle sync slash commands
                 if user_input.startswith("/"):
                     if not self.handle_command(user_input):
-                        self.print_history(format_system_message("Goodbye!"))
+                        self.add_message(create_system_message("Goodbye!"))
                         break
                     continue
 

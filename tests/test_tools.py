@@ -2,7 +2,6 @@ from typing import cast
 
 from nano_agent.tools import (
     BashTool,
-    EditConfirmTool,
     EditTool,
     GlobTool,
     InputSchemaDict,
@@ -238,20 +237,6 @@ class TestStatTool:
         assert schema["required"] == ["file_path"]
 
 
-class TestEditConfirmTool:
-    def test_default_values(self) -> None:
-        tool = EditConfirmTool()
-        assert tool.name == "EditConfirm"
-        assert "pending edit" in tool.description
-
-    def test_input_schema_has_required_fields(self) -> None:
-        tool = EditConfirmTool()
-        schema = tool.input_schema
-        props = get_properties(schema)
-        assert "edit_id" in props
-        assert schema["required"] == ["edit_id"]
-
-
 class TestPythonTool:
     def test_default_values(self) -> None:
         tool = PythonTool()
@@ -274,9 +259,9 @@ class TestPythonTool:
 
 class TestDefaultTools:
     def test_default_tools_count(self) -> None:
-        # 11 tools (excludes WebSearch stub)
+        # 10 tools (excludes WebSearch stub, EditConfirm removed)
         tools = get_default_tools()
-        assert len(tools) == 11
+        assert len(tools) == 10
 
     def test_default_tools_are_tool_instances(self) -> None:
         tools = get_default_tools()
@@ -297,7 +282,7 @@ class TestDefaultTools:
             assert "input_schema" in result
 
     def test_default_tools_names(self) -> None:
-        # Excludes stub tool: WebSearch
+        # Excludes stub tool: WebSearch; EditConfirm removed
         expected_names = {
             "Bash",
             "Glob",
@@ -305,7 +290,6 @@ class TestDefaultTools:
             "Read",
             "Stat",
             "Edit",
-            "EditConfirm",
             "Write",
             "WebFetch",
             "TodoWrite",
@@ -488,17 +472,15 @@ import tempfile
 from pathlib import Path
 
 from nano_agent.tools import (
-    EditConfirmInput,
     EditInput,
     StatInput,
     WebFetchInput,
     WriteInput,
-    _pending_edits,
 )
 
 
 class TestEditToolFunctional:
-    """Functional tests for the two-step EditTool workflow."""
+    """Functional tests for EditTool (auto-approves without permission_callback)."""
 
     def test_edit_file_not_found(self) -> None:
         tool = EditTool()
@@ -578,14 +560,18 @@ class TestEditToolFunctional:
                 )
             )
             assert isinstance(result, TextContent)
-            assert "Edit Preview" in result.text
-            assert "edit_id=" in result.text
-            # Should mention all 3 occurrences
+            # Without permission_callback, edit is auto-approved
+            assert "✓ Edit applied" in result.text
             assert "3 occurrences" in result.text
+
+            # Verify file was modified
+            content = Path(temp_path).read_text()
+            assert content == "world\nworld\nworld\n"
         finally:
             os.unlink(temp_path)
 
-    def test_edit_preview_returns_edit_id(self) -> None:
+    def test_edit_applies_without_callback(self) -> None:
+        """Edit tool auto-approves when no permission_callback is set."""
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
             f.write("def foo():\n    pass\n")
             temp_path = f.name
@@ -602,9 +588,43 @@ class TestEditToolFunctional:
                 )
             )
             assert isinstance(result, TextContent)
-            assert "Edit Preview" in result.text
-            assert "NOT applied" in result.text
-            assert 'edit_id="' in result.text
+            assert "✓ Edit applied" in result.text
+
+            # Verify file was modified
+            content = Path(temp_path).read_text()
+            assert "def bar():" in content
+            assert "def foo():" not in content
+        finally:
+            os.unlink(temp_path)
+
+    def test_edit_rejected_by_callback(self) -> None:
+        """Edit tool respects permission_callback rejection."""
+
+        async def reject_callback(file_path: str, preview: str, match_count: int) -> bool:
+            return False
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
+            f.write("def foo():\n    pass\n")
+            temp_path = f.name
+
+        try:
+            tool = EditTool(permission_callback=reject_callback)
+            result = asyncio.run(
+                tool.execute(
+                    {
+                        "file_path": temp_path,
+                        "old_string": "def foo():",
+                        "new_string": "def bar():",
+                    }
+                )
+            )
+            assert isinstance(result, TextContent)
+            assert "rejected" in result.text.lower()
+
+            # Verify file was NOT modified
+            content = Path(temp_path).read_text()
+            assert "def foo():" in content
+            assert "def bar():" not in content
         finally:
             os.unlink(temp_path)
 
@@ -627,56 +647,6 @@ class TestEditToolFunctional:
             assert isinstance(result, TextContent)
             assert "Error" in result.text
             assert "identical" in result.text
-        finally:
-            os.unlink(temp_path)
-
-
-class TestEditConfirmToolFunctional:
-    """Functional tests for EditConfirmTool."""
-
-    def test_confirm_invalid_edit_id(self) -> None:
-        tool = EditConfirmTool()
-        result = asyncio.run(tool.execute({"edit_id": "invalid123"}))
-        assert isinstance(result, TextContent)
-        assert "Error" in result.text
-        assert "not found or expired" in result.text
-
-    def test_full_edit_confirm_workflow(self) -> None:
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
-            f.write("def foo():\n    pass\n")
-            temp_path = f.name
-
-        try:
-            # Step 1: Create edit preview
-            edit_tool = EditTool()
-            preview_result = asyncio.run(
-                edit_tool.execute(
-                    {
-                        "file_path": temp_path,
-                        "old_string": "def foo():",
-                        "new_string": "def bar():",
-                    }
-                )
-            )
-
-            # Extract edit_id from result
-            import re
-
-            assert isinstance(preview_result, TextContent)
-            match = re.search(r'edit_id="([^"]+)"', preview_result.text)
-            assert match is not None
-            edit_id = match.group(1)
-
-            # Step 2: Confirm the edit
-            confirm_tool = EditConfirmTool()
-            confirm_result = asyncio.run(confirm_tool.execute({"edit_id": edit_id}))
-            assert isinstance(confirm_result, TextContent)
-            assert "✓ Edit applied" in confirm_result.text
-
-            # Step 3: Verify the file was actually modified
-            content = Path(temp_path).read_text()
-            assert "def bar():" in content
-            assert "def foo():" not in content
         finally:
             os.unlink(temp_path)
 

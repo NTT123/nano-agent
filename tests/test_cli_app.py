@@ -92,69 +92,6 @@ class TestTerminalAppAutoSave:
             app._auto_save()
 
 
-class TestTerminalAppAutoLoad:
-    """Tests for auto-load functionality."""
-
-    def test_auto_load_returns_false_when_no_file(self, tmp_path: Path) -> None:
-        """Test that _auto_load returns False when no session file exists."""
-        app = TerminalApp()
-        
-        with patch("cli.app.Path.cwd", return_value=tmp_path):
-            result = app._auto_load()
-        
-        assert result is False
-
-    def test_auto_load_loads_session(self, tmp_path: Path) -> None:
-        """Test that _auto_load loads a session correctly."""
-        # First create a session file
-        original_dag = DAG().system("test system").user("hello user")
-        session_file = tmp_path / SESSION_FILE
-        original_dag.save(session_file, session_id="test-session-123")
-        
-        # Now load it
-        app = TerminalApp()
-        # Suppress console output during test
-        app.console = MagicMock()
-        
-        with patch("cli.app.Path.cwd", return_value=tmp_path):
-            result = app._auto_load()
-        
-        assert result is True
-        assert app.dag is not None
-        assert app.dag.get_system_prompt() == "test system"
-
-    def test_auto_load_restores_tools(self, tmp_path: Path) -> None:
-        """Test that _auto_load restores tools to the loaded DAG."""
-        # Create a session file
-        original_dag = DAG().system("test").user("hello")
-        session_file = tmp_path / SESSION_FILE
-        original_dag.save(session_file)
-        
-        # Load with tools
-        app = TerminalApp()
-        app.console = MagicMock()
-        
-        with patch("cli.app.Path.cwd", return_value=tmp_path):
-            result = app._auto_load()
-        
-        assert result is True
-        # Default tools should be restored
-        assert len(app.dag.get_tools()) > 0
-
-    def test_auto_load_handles_corrupt_file(self, tmp_path: Path) -> None:
-        """Test that _auto_load handles corrupt session files gracefully."""
-        session_file = tmp_path / SESSION_FILE
-        session_file.write_text("{ invalid json }")
-        
-        app = TerminalApp()
-        app.console = MagicMock()
-        
-        with patch("cli.app.Path.cwd", return_value=tmp_path):
-            result = app._auto_load()
-        
-        assert result is False
-
-
 class TestTerminalAppCommands:
     """Tests for command handling."""
 

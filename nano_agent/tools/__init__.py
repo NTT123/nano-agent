@@ -26,13 +26,9 @@ from .base import (
 )
 from .bash import BashInput, BashTool
 from .edit import (
-    EditConfirmInput,
-    EditConfirmTool,
     EditInput,
     EditTool,
-    PendingEdit,
-    _pending_edits,
-    get_pending_edit,
+    PermissionCallback,
 )
 from .glob import GlobInput, GlobTool
 from .grep import GrepInput, GrepTool
@@ -62,7 +58,6 @@ def get_default_tools() -> list[Tool]:
         ReadTool(),
         StatTool(),
         EditTool(),
-        EditConfirmTool(),
         WriteTool(),
         WebFetchTool(),
         TodoWriteTool(),
@@ -101,10 +96,7 @@ __all__ = [
     # Edit tools
     "EditTool",
     "EditInput",
-    "EditConfirmTool",
-    "EditConfirmInput",
-    "PendingEdit",
-    "get_pending_edit",
+    "PermissionCallback",
     # Write tool
     "WriteTool",
     "WriteInput",
