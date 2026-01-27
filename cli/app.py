@@ -51,7 +51,9 @@ from nano_agent import (
     ToolResultContent,
     ToolUseContent,
 )
+from nano_agent.api_base import APIError
 from nano_agent.cancellation import CancellationToken
+from nano_agent.capture_claude_code_auth import get_config
 from nano_agent.tools import (
     BashTool,
     EditConfirmTool,
@@ -279,10 +281,25 @@ class TerminalApp:
         self.print_history(format_system_message("Connecting to Claude Code API..."))
 
         try:
-            self.api = ClaudeCodeAPI()
+            try:
+                self.api = ClaudeCodeAPI()
+            except ValueError:
+                # No saved config - capture credentials first
+                self.print_history(
+                    format_system_message("No saved credentials, capturing from Claude CLI...")
+                )
+                if not await self._refresh_token():
+                    return False
+
+            # Validate token with warm-up (refreshes if needed)
+            if not await self._warmup_and_validate_token():
+                return False
+
+            # Token is valid, set up main DAG
             model = self.api.model
             system_prompt, claude_md_loaded = build_system_prompt(model)
             self.dag = DAG().system(system_prompt).tools(*self.tools)
+
             self.print_history(format_system_message(f"Connected using {model}"))
             if claude_md_loaded:
                 self.print_history(format_system_message("Loaded CLAUDE.md into system prompt"))
@@ -324,6 +341,75 @@ class TerminalApp:
                     "Set GEMINI_API_KEY environment variable to use Gemini."
                 )
             )
+            return False
+
+    async def _warmup_and_validate_token(self, max_retries: int = 3) -> bool:
+        """Send warm-up message to validate token, refresh if needed.
+
+        Args:
+            max_retries: Maximum token refresh attempts.
+
+        Returns:
+            True if token is valid (after potential refresh), False if all retries failed.
+        """
+        for attempt in range(max_retries):
+            try:
+                # Create temporary DAG just for warm-up (not self.dag)
+                warmup_dag = DAG().system("You are helpful.").user("hi")
+
+                # Send warm-up request
+                self.print_history(format_system_message("Validating token..."))
+                await self.api.send(warmup_dag)  # type: ignore[union-attr]
+
+                # Success - token is valid
+                self.print_history(format_system_message("Token valid."))
+                return True
+
+            except APIError as e:
+                if e.status_code == 401:
+                    self.print_history(
+                        format_system_message(
+                            f"Token expired (attempt {attempt + 1}/{max_retries}), refreshing..."
+                        )
+                    )
+
+                    # Refresh token
+                    if not await self._refresh_token():
+                        continue  # Refresh failed, try again
+
+                    # Token refreshed, loop will retry warm-up
+                else:
+                    # Non-401 error, propagate
+                    raise
+
+        # All retries exhausted
+        self.print_history(
+            format_error_message("Failed to validate token after all attempts.")
+        )
+        return False
+
+    async def _refresh_token(self) -> bool:
+        """Refresh OAuth token by capturing from Claude CLI.
+
+        Returns:
+            True if refresh successful, False otherwise.
+        """
+        try:
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, lambda: get_config(timeout=30))
+
+            # Re-create API with new token
+            self.api = ClaudeCodeAPI()
+            self.print_history(format_system_message("Token refreshed."))
+            return True
+
+        except TimeoutError:
+            self.print_history(
+                format_error_message("Token refresh timed out. Is Claude CLI available?")
+            )
+            return False
+        except RuntimeError as e:
+            self.print_history(format_error_message(f"Token refresh failed: {e}"))
             return False
 
     async def get_user_input(self) -> str | None:

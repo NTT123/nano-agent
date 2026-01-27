@@ -69,20 +69,48 @@ class MITMCaptureHandler(BaseHTTPRequestHandler):
             cls.http_client = None
 
     def do_POST(self) -> None:
-        """Capture request and forward to real Anthropic API."""
+        """Capture request and return minimal response (no forwarding needed)."""
         # Read request body
         content_length = int(self.headers.get("Content-Length", 0))
         body_bytes = self.rfile.read(content_length) if content_length > 0 else b""
 
         # Try to capture config from this request
-        self._maybe_capture_config(body_bytes)
+        captured = self._maybe_capture_config(body_bytes)
 
-        # Forward to real API and return real response
-        self._forward_to_api(body_bytes)
+        # Return minimal response - we don't need to forward to real API
+        # Just need the headers/auth token for config capture
+        if captured:
+            # Return a minimal valid response so CLI exits cleanly
+            self._send_minimal_response()
+        else:
+            # Not a config request, forward to real API
+            self._forward_to_api(body_bytes)
 
     def do_GET(self) -> None:
         """Handle GET requests by forwarding to real API."""
         self._forward_to_api(b"")
+
+    def _send_minimal_response(self) -> None:
+        """Send minimal valid Claude API response after capturing config."""
+        # Minimal response that satisfies Claude CLI
+        response_body = json.dumps({
+            "id": "msg_capture",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "ok"}],
+            "model": "claude-sonnet-4-20250514",
+            "stop_reason": "end_turn",
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }).encode("utf-8")
+
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(response_body)))
+            self.end_headers()
+            self.wfile.write(response_body)
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass  # Client disconnected, ignore
 
     def _forward_to_api(self, body_bytes: bytes) -> None:
         """Forward request to real Anthropic API and return real response."""
@@ -119,14 +147,20 @@ class MITMCaptureHandler(BaseHTTPRequestHandler):
             self.wfile.write(response.content)
 
         except Exception as e:
-            # On error, send a minimal error response
-            print(f"✗ Forward error: {e}", file=sys.stderr)
-            error_response = json.dumps({"error": str(e)}).encode("utf-8")
-            self.send_response(500)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(error_response)))
-            self.end_headers()
-            self.wfile.write(error_response)
+            # On error, try to send a minimal error response
+            # Suppress noise if we already captured config (client may have disconnected)
+            if not MITMCaptureHandler.all_captured_configs:
+                print(f"✗ Forward error: {e}", file=sys.stderr)
+            try:
+                error_response = json.dumps({"error": str(e)}).encode("utf-8")
+                self.send_response(500)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(error_response)))
+                self.end_headers()
+                self.wfile.write(error_response)
+            except (BrokenPipeError, ConnectionResetError, OSError):
+                # Client disconnected, ignore
+                pass
 
     def _maybe_capture_config(self, body_bytes: bytes) -> bool:
         """Capture config if valid full-config request. Appends to list."""
@@ -192,6 +226,14 @@ class MITMCaptureHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: object) -> None:
         """Suppress default logging."""
         pass
+
+    def handle(self) -> None:
+        """Handle request, suppressing errors after config is captured."""
+        try:
+            super().handle()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            # Client disconnected, ignore if we already captured config
+            pass
 
 
 def _count_words(text: str) -> int:
