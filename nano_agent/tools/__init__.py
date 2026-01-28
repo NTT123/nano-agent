@@ -43,6 +43,7 @@ from .python import (
 from .read import ReadInput, ReadTool
 from .stat import StatInput, StatTool
 from .todo import Todo, TodoItemInput, TodoStatus, TodoWriteInput, TodoWriteTool
+from .tmux import TmuxInput, TmuxTool
 from .webfetch import WebFetchInput, WebFetchTool
 from .write import WriteInput, WriteTool
 
@@ -118,6 +119,9 @@ __all__ = [
     "PythonScript",
     "list_python_scripts",
     "clear_python_scripts",
+    # Tmux tool
+    "TmuxTool",
+    "TmuxInput",
     # Default tools function
     "get_default_tools",
 ]
