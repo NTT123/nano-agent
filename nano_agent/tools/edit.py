@@ -32,43 +32,61 @@ def _generate_preview(
     new_string: str,
     context_lines: int = 3,
 ) -> tuple[str, list[str], list[str]]:
-    """Generate a diff-style preview of the edit.
+    """Generate a unified diff-style preview of the edit.
 
     Returns:
         Tuple of (preview_text, context_before, context_after)
     """
-    total_lines = len(lines)
+    import difflib
 
-    # Get context lines
+    total_lines = len(lines)
+    old_lines = old_string.splitlines()
+    new_lines = new_string.splitlines()
+
+    # Calculate the range we're working with
     start = max(0, match_line - context_lines)
-    end = min(total_lines, match_line + context_lines + old_string.count("\n") + 1)
+    old_end = match_line + len(old_lines)
+    end = min(total_lines, old_end + context_lines)
 
     context_before = lines[start:match_line]
-    context_after = lines[match_line + old_string.count("\n") + 1 : end]
+    context_after = lines[old_end:end]
 
-    # Build preview
+    # Build the old and new versions of the affected region
+    old_region = lines[start:old_end]
+    new_region = lines[start:match_line] + new_lines + lines[old_end:end]
+
+    # Use difflib to generate unified diff
+    diff = list(difflib.unified_diff(
+        old_region,
+        new_region,
+        lineterm='',
+        n=context_lines
+    ))
+
+    # Skip the header lines (--- and +++ and @@)
+    # and format with line numbers
     preview_parts = []
+    old_line_num = start + 1
+    new_line_num = start + 1
 
-    # Show lines before
-    for i, line in enumerate(lines[start:match_line], start=start + 1):
-        preview_parts.append(f"     {i:6}\t{line}")
-
-    # Show old lines (to be removed)
-    old_lines = old_string.splitlines()
-    for i, line in enumerate(old_lines):
-        line_num = match_line + i + 1
-        preview_parts.append(f"  -  {line_num:6}\t{line}")
-
-    # Show new lines (to be added)
-    new_lines = new_string.splitlines()
-    for i, line in enumerate(new_lines):
-        line_num = match_line + i + 1
-        preview_parts.append(f"  +  {line_num:6}\t{line}")
-
-    # Show lines after
-    after_start = match_line + len(old_lines)
-    for i, line in enumerate(lines[after_start:end], start=after_start + 1):
-        preview_parts.append(f"     {i:6}\t{line}")
+    for line in diff:
+        if line.startswith('---') or line.startswith('+++') or line.startswith('@@'):
+            continue
+        elif line.startswith('-'):
+            preview_parts.append(f"  -  {old_line_num:6}\t{line[1:]}")
+            old_line_num += 1
+        elif line.startswith('+'):
+            preview_parts.append(f"  +  {new_line_num:6}\t{line[1:]}")
+            new_line_num += 1
+        elif line.startswith(' '):
+            preview_parts.append(f"     {old_line_num:6}\t{line[1:]}")
+            old_line_num += 1
+            new_line_num += 1
+        else:
+            # Empty line in diff
+            preview_parts.append(f"     {old_line_num:6}\t{line}")
+            old_line_num += 1
+            new_line_num += 1
 
     return "\n".join(preview_parts), context_before, context_after
 
