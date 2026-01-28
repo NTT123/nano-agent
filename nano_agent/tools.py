@@ -14,11 +14,11 @@ Example:
 
 # Re-export everything from the tools package
 from nano_agent.tools import (
+    AskUserQuestionInput,
+    AskUserQuestionTool,
     BashInput,
     BashTool,
     Desc,
-    EditConfirmInput,
-    EditConfirmTool,
     EditInput,
     EditTool,
     Field,
@@ -27,7 +27,6 @@ from nano_agent.tools import (
     GrepInput,
     GrepTool,
     InputSchemaDict,
-    PendingEdit,
     PythonInput,
     PythonScript,
     PythonTool,
@@ -51,7 +50,6 @@ from nano_agent.tools import (
     WriteInput,
     WriteTool,
     _DEFAULT_TRUNCATION_CONFIG,
-    _pending_edits,
     _python_scripts,
     _save_full_output,
     _truncate_text_content,
@@ -62,7 +60,6 @@ from nano_agent.tools import (
     convert_input,
     get_call_input_type,
     get_default_tools,
-    get_pending_edit,
     list_python_scripts,
     schema_from_dataclass,
 )
@@ -84,6 +81,9 @@ __all__ = [
     # Question data classes
     "Question",
     "QuestionOption",
+    # AskUserQuestion tool
+    "AskUserQuestionTool",
+    "AskUserQuestionInput",
     # Bash tool
     "BashTool",
     "BashInput",
@@ -99,10 +99,6 @@ __all__ = [
     # Edit tools
     "EditTool",
     "EditInput",
-    "EditConfirmTool",
-    "EditConfirmInput",
-    "PendingEdit",
-    "get_pending_edit",
     # Write tool
     "WriteTool",
     "WriteInput",

@@ -98,6 +98,8 @@ class MessageList:
             console: The Rich console to render to
         """
         for item in msg.output_buffer:
+            # Ensure we start at column 1 (avoid inherited cursor offsets)
+            console.print("\r", end="")
             renderable = self.render_item(item)
             console.print(renderable)
 

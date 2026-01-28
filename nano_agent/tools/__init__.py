@@ -24,6 +24,7 @@ from .base import (
     get_call_input_type,
     schema_from_dataclass,
 )
+from .ask_user_question import AskUserQuestionInput, AskUserQuestionTool
 from .bash import BashInput, BashTool
 from .edit import (
     EditInput,
@@ -63,6 +64,7 @@ def get_default_tools() -> list[Tool]:
         WebFetchTool(),
         TodoWriteTool(),
         PythonTool(),
+        AskUserQuestionTool(),
     ]
 
 __all__ = [
@@ -82,6 +84,9 @@ __all__ = [
     # Question data classes
     "Question",
     "QuestionOption",
+    # AskUserQuestion tool
+    "AskUserQuestionTool",
+    "AskUserQuestionInput",
     # Bash tool
     "BashTool",
     "BashInput",

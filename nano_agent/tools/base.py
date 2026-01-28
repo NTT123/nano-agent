@@ -260,6 +260,15 @@ class Question:
         list[QuestionOption], Desc("The available choices for this question")
     ]
     multiSelect: Annotated[bool, Desc("Set to true to allow multiple selections")]
+    allowCustom: Annotated[
+        bool, Desc("Set to true to allow a freeform custom response")
+    ] = False
+    customLabel: Annotated[
+        str, Desc("Label for the custom response option")
+    ] = "Other..."
+    customPrompt: Annotated[
+        str, Desc("Prompt text for collecting a custom response")
+    ] = "Your answer: "
 
 
 def _get_json_type_for_python_type(

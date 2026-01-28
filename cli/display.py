@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from rich import box
-from rich.console import Group, RenderableType
+from rich.console import RenderableType
 from rich.markdown import ListItem, Markdown, MarkdownElement, TextElement
 from rich.segment import Segment
 from rich.syntax import Syntax
@@ -20,7 +20,19 @@ if TYPE_CHECKING:
     from rich.console import Console, ConsoleOptions, RenderResult
     from rich.markdown import MarkdownContext, TableBodyElement, TableHeaderElement
 
-from rich._loop import loop_first
+def _loop_first(iterable):
+    """Yield (is_first, item) for each element."""
+    iterator = iter(iterable)
+    try:
+        first_item = next(iterator)
+    except StopIteration:
+        return
+    yield True, first_item
+    for item in iterator:
+        yield False, item
+
+# Large width to prevent Rich from truncating long lines in markdown elements
+WIDE_RENDER_WIDTH = 9999
 
 
 class WideListItem(ListItem):
@@ -47,15 +59,14 @@ class WideListItem(ListItem):
     def render_bullet(
         self, console: "Console", options: "ConsoleOptions"
     ) -> "RenderResult":
-        # Use large width to prevent truncation
-        render_options = options.update(width=9999)
+        render_options = options.update(width=WIDE_RENDER_WIDTH)
         lines = console.render_lines(self.elements, render_options, style=self.style)
         bullet_style = console.get_style("markdown.item.bullet", default="none")
 
         bullet = Segment(" • ", bullet_style)
         padding = Segment(" " * 3, bullet_style)
         new_line = Segment("\n")
-        for first, line in loop_first(lines):
+        for first, line in _loop_first(lines):
             yield bullet if first else padding
             yield from self._strip_trailing_spaces(line)
             yield new_line
@@ -67,8 +78,7 @@ class WideListItem(ListItem):
         number: int,
         last_number: int,
     ) -> "RenderResult":
-        # Use large width to prevent truncation
-        render_options = options.update(width=9999)
+        render_options = options.update(width=WIDE_RENDER_WIDTH)
         lines = console.render_lines(self.elements, render_options, style=self.style)
         number_style = console.get_style("markdown.item.number", default="none")
 
@@ -77,7 +87,7 @@ class WideListItem(ListItem):
         number_seg = Segment(number_str, number_style)
         padding = Segment(" " * number_width, number_style)
         new_line = Segment("\n")
-        for first, line in loop_first(lines):
+        for first, line in _loop_first(lines):
             yield number_seg if first else padding
             yield from self._strip_trailing_spaces(line)
             yield new_line
@@ -210,8 +220,16 @@ class LimitedMarkdown(Markdown):
 
 
 def format_user_message(text: str) -> RenderableType:
-    """Format a user message with prompt prefix, subtle background, and empty line before."""
-    return Group(Text(""), Text(f"> {text}", style="on grey30"))
+    """Format a user message with prompt prefix and subtle background."""
+    prompt = "> "
+    lines = text.split("\n")
+    if not lines:
+        return Text(prompt, style="on grey30")
+    padded = [f"{prompt}{lines[0]}"]
+    indent = " " * len(prompt)
+    for line in lines[1:]:
+        padded.append(f"{indent}{line}")
+    return Text("\n".join(padded), style="on grey30")
 
 
 def format_assistant_message(text: str) -> RenderableType:
@@ -326,6 +344,101 @@ def format_error_message(text: str) -> Text:
 def format_thinking_separator() -> Text:
     """Format a short separator line between thinking and response."""
     return Text("─" * 5, style="dim")
+
+
+def format_status_bar(
+    auto_accept: bool,
+    total_input_tokens: int,
+    total_output_tokens: int,
+) -> Text:
+    """Format the status bar with auto-accept and token stats.
+
+    Args:
+        auto_accept: Whether auto-accept mode is enabled
+        total_input_tokens: Cumulative input tokens
+        total_output_tokens: Cumulative output tokens
+
+    Returns:
+        Formatted Text object for the status bar
+    """
+    result = Text()
+
+    # Auto-accept status
+    if auto_accept:
+        result.append("Auto-accept: ", style="dim")
+        result.append("ON", style="green bold")
+    else:
+        result.append("Auto-accept: ", style="dim")
+        result.append("off", style="dim")
+
+    result.append(" │ ", style="dim")
+
+    # Token stats
+    result.append(f"Tokens: {total_input_tokens:,}↓ {total_output_tokens:,}↑", style="dim")
+
+    return result
+
+
+def format_status_bar_with_spinner(
+    spinner_text: str | None,
+    auto_accept: bool,
+    total_input_tokens: int,
+    total_output_tokens: int,
+) -> Table:
+    """Format status bar with optional spinner for Live display.
+
+    Args:
+        spinner_text: Activity text to show with spinner (e.g., "Thinking...",
+                      "Running Bash..."). None means no spinner.
+        auto_accept: Whether auto-accept mode is enabled
+        total_input_tokens: Cumulative input tokens
+        total_output_tokens: Cumulative output tokens
+
+    Returns:
+        A Table grid suitable for Rich Live display
+
+    Example output:
+        ⠋ Thinking... │ Auto-accept: off │ Tokens: 1,234↓ 567↑
+    """
+    from rich.spinner import Spinner
+
+    grid = Table.grid(padding=(0, 1))
+    grid.add_column()  # Spinner column
+    grid.add_column()  # Activity text
+    grid.add_column()  # Separator
+    grid.add_column()  # Auto-accept
+    grid.add_column()  # Separator
+    grid.add_column()  # Tokens
+
+    # Build status parts
+    if spinner_text:
+        spinner = Spinner("dots")
+        activity = Text(f"{spinner_text} ", style="cyan")
+    else:
+        spinner = Text("")
+        activity = Text("")
+
+    sep = Text("│", style="dim")
+
+    # Auto-accept status
+    auto_text = Text()
+    auto_text.append("Auto-accept: ", style="dim")
+    if auto_accept:
+        auto_text.append("ON", style="green bold")
+    else:
+        auto_text.append("off", style="dim")
+
+    # Token stats
+    tokens_text = Text()
+    tokens_text.append(f"Tokens: {total_input_tokens:,}↓ {total_output_tokens:,}↑", style="dim")
+
+    # Add escape hint when spinner is active
+    if spinner_text:
+        escape_hint = Text(" (Esc to cancel)", style="dim italic")
+        tokens_text.append_text(escape_hint)
+
+    grid.add_row(spinner, activity, sep, auto_text, sep, tokens_text)
+    return grid
 
 
 def format_token_count(

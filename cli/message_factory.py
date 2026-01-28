@@ -8,21 +8,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from rich.console import Group
 from rich.text import Text
 
-from .display import (
-    format_assistant_message,
-    format_error_message,
-    format_system_message,
-    format_thinking_message,
-    format_thinking_separator,
-    format_token_count,
-    format_tool_call,
-    format_tool_result,
-    format_user_message,
-)
 from .messages import MessageStatus, RenderItem, UIMessage
+from .rendering import MessageRenderer
+
+renderer = MessageRenderer()
 
 if TYPE_CHECKING:
     from rich.console import RenderableType
@@ -38,11 +29,10 @@ def create_welcome_message() -> UIMessage:
     msg.append(Text("nano-cli", style="bold cyan"))
     msg.append(
         Text(
-            "Type your message. /help for commands. Esc to cancel. Ctrl+D to exit.",
+            "Type your message. /help for commands. Shift+Tab toggles auto-accept. Ctrl+D to exit.",
             style="dim",
         )
     )
-    msg.append_newline()
     msg.status = MessageStatus.COMPLETE
     return msg
 
@@ -57,7 +47,7 @@ def create_system_message(text: str) -> UIMessage:
         UIMessage configured as a system message
     """
     msg = UIMessage(message_type="system")
-    msg.append(format_system_message(text))
+    msg.append(renderer.system(text))
     msg.status = MessageStatus.COMPLETE
     return msg
 
@@ -72,7 +62,7 @@ def create_user_message(text: str) -> UIMessage:
         UIMessage configured as a user message
     """
     msg = UIMessage(message_type="user")
-    msg.append(format_user_message(text))
+    msg.append(renderer.user(text))
     msg.append_newline()
     msg.status = MessageStatus.COMPLETE
     return msg
@@ -97,7 +87,8 @@ def add_thinking_to_assistant(msg: UIMessage, thinking: str) -> None:
         thinking: The thinking content text
     """
     if thinking and thinking.strip():
-        msg.append(format_thinking_message(thinking))
+        msg.append(renderer.thinking(thinking))
+        msg.append_newline()
 
 
 def add_text_to_assistant(
@@ -122,28 +113,10 @@ def add_text_to_assistant(
     """
     if text and text.strip():
         if has_thinking:
-            msg.append(format_thinking_separator())
-        msg.append(
-            Group(
-                format_assistant_message(text),
-                format_token_count(
-                    input_tokens=input_tokens,
-                    output_tokens=output_tokens,
-                    cache_creation_tokens=cache_creation_tokens,
-                    cache_read_tokens=cache_read_tokens,
-                ),
-            )
-        )
-    else:
-        # Just token count if no text
-        msg.append(
-            format_token_count(
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                cache_creation_tokens=cache_creation_tokens,
-                cache_read_tokens=cache_read_tokens,
-            )
-        )
+            msg.append(renderer.thinking_separator())
+            msg.append_newline()
+        msg.append(renderer.assistant(text))
+        msg.append_newline()
 
 
 def create_tool_call_message(name: str, params: dict[str, Any]) -> UIMessage:
@@ -157,7 +130,7 @@ def create_tool_call_message(name: str, params: dict[str, Any]) -> UIMessage:
         UIMessage configured as a tool call message
     """
     msg = UIMessage(message_type="tool_call")
-    msg.append(format_tool_call(name, params))
+    msg.append(renderer.tool_call(name, params))
     msg.status = MessageStatus.PENDING
     return msg
 
@@ -173,7 +146,22 @@ def create_tool_result_message(result: str, is_error: bool = False) -> UIMessage
         UIMessage configured as a tool result message
     """
     msg = UIMessage(message_type="tool_result")
-    msg.append(format_tool_result(result, is_error=is_error))
+    msg.append(renderer.tool_result(result, is_error=is_error))
+    msg.status = MessageStatus.COMPLETE
+    return msg
+
+
+def create_question_message(text: str) -> UIMessage:
+    """Create a question message for user prompts.
+
+    Args:
+        text: The question text
+
+    Returns:
+        UIMessage configured as a question message
+    """
+    msg = UIMessage(message_type="question")
+    msg.append(renderer.tool_result(text))
     msg.status = MessageStatus.COMPLETE
     return msg
 
@@ -188,7 +176,7 @@ def create_error_message(text: str) -> UIMessage:
         UIMessage configured as an error message
     """
     msg = UIMessage(message_type="error", status=MessageStatus.ERROR)
-    msg.append(format_error_message(text))
+    msg.append(renderer.error(text))
     return msg
 
 
@@ -211,6 +199,7 @@ def create_permission_message(
     msg.append(Text(f"File: {file_path}", style="cyan"))
     if match_count > 1:
         msg.append(Text(f"(Replacing {match_count} occurrences)", style="yellow dim"))
+    msg.append(Text("Confirm: press y/n/Esc", style="yellow dim"))
     msg.append_newline()
 
     # Display the diff preview with background colors

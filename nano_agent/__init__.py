@@ -57,6 +57,8 @@ from .openai_api import OpenAIAPI
 
 # Tools (including Todo data classes merged from tool_handlers)
 from .tools import (
+    AskUserQuestionInput,
+    AskUserQuestionTool,
     BashInput,
     BashTool,
     Desc,
@@ -167,6 +169,8 @@ __all__ = [
     "TodoItemInput",
     "Question",
     "QuestionOption",
+    "AskUserQuestionTool",
+    "AskUserQuestionInput",
     "PythonTool",
     "PythonInput",
     "PythonScript",

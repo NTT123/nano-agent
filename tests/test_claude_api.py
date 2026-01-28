@@ -179,7 +179,7 @@ class TestClaudeAPI:
         api = ClaudeAPI(api_key="test-key")
         assert api.api_key == "test-key"
         assert api.model == "claude-sonnet-4-20250514"
-        assert api.max_tokens == 8192
+        assert api.max_tokens == 16000
         assert api.temperature == 1.0
         assert api.thinking_budget == 10000
         assert api.base_url == "https://api.anthropic.com/v1/messages"
@@ -213,7 +213,7 @@ class TestClaudeAPI:
         api = ClaudeAPI(api_key="sk-ant-1234567890abcdef")
         repr_str = repr(api)
         assert "claude-sonnet-4-20250514" in repr_str
-        assert "8192" in repr_str
+        assert "16000" in repr_str
         # First 15 chars of "sk-ant-1234567890abcdef" = "sk-ant-12345678"
         assert "sk-ant-12345678..." in repr_str
 
@@ -247,7 +247,7 @@ class TestClaudeAPI:
         # Verify body
         body = call_args[1]["json"]
         assert body["model"] == "claude-sonnet-4-20250514"
-        assert body["max_tokens"] == 8192
+        assert body["max_tokens"] == 16000
         assert body["temperature"] == 1.0
         assert body["thinking"] == {"type": "enabled", "budget_tokens": 10000}
         assert body["messages"] == [{"role": "user", "content": "What is 2+2?"}]

@@ -22,44 +22,32 @@ Architecture:
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any
 
-from prompt_toolkit import PromptSession
-from prompt_toolkit.history import FileHistory
-from prompt_toolkit.input.vt100 import Vt100Input
-from prompt_toolkit.key_binding import KeyBindings, KeyPressEvent
-from prompt_toolkit.keys import Keys
-from prompt_toolkit.styles import Style
-from rich.console import Console, Group, RenderableType
-from rich.json import JSON
-from rich.live import Live
+from rich.console import Console, RenderableType
 from rich.panel import Panel
-from rich.spinner import Spinner
 from rich.text import Text
 from rich.theme import Theme
 
 from nano_agent import (
     DAG,
     ClaudeCodeAPI,
+    CodexAPI,
     GeminiAPI,
-    Message,
     Response,
-    Role,
     TextContent,
-    ThinkingContent,
     ToolResultContent,
     ToolUseContent,
 )
 from nano_agent.api_base import APIError
 from nano_agent.cancellation import CancellationToken
-from nano_agent.capture_claude_code_auth import get_config
+from nano_agent.capture_claude_code_auth import async_get_config
 from nano_agent.tools import (
+    AskUserQuestionTool,
     BashTool,
     EditTool,
     GlobTool,
@@ -70,26 +58,19 @@ from nano_agent.tools import (
     Tool,
     WebFetchTool,
     WriteTool,
+    convert_input,
 )
 
-from .display import (
-    format_assistant_message,
-    format_error_message,
-    format_system_message,
-    format_thinking_message,
-    format_thinking_separator,
-    format_token_count,
-    format_tool_call,
-    format_tool_result,
-    format_user_message,
-)
-from .input_handler import InputHandler
+from .commands import CommandContext, CommandRouter
+from .input_controller import InputController
+from .mapper import DAGMessageMapper
 from .message_factory import (
     add_text_to_assistant,
     add_thinking_to_assistant,
     create_assistant_message,
     create_error_message,
     create_permission_message,
+    create_question_message,
     create_system_message,
     create_tool_call_message,
     create_tool_result_message,
@@ -98,13 +79,13 @@ from .message_factory import (
 )
 from .message_list import MessageList
 from .messages import UIMessage
-
-# Auto-save session file in current directory
-SESSION_FILE = ".nano-cli-session.json"
+from .session import SessionStore
 
 
-def build_system_prompt(model: str) -> tuple[str, bool]:
-    """Build system prompt with dynamic context.
+async def build_system_prompt_async(model: str) -> tuple[str, bool]:
+    """Build system prompt with dynamic context (async version).
+
+    Uses run_in_executor for non-blocking file I/O.
 
     Returns:
         A tuple of (system_prompt, claude_md_loaded) where claude_md_loaded
@@ -129,8 +110,11 @@ Be concise but helpful. When using tools, explain briefly what you're doing."""
     claude_md_path = os.path.join(cwd, "CLAUDE.md")
     if os.path.isfile(claude_md_path):
         try:
-            with open(claude_md_path, "r", encoding="utf-8") as f:
-                claude_md_content = f.read()
+            # Use run_in_executor for non-blocking file read
+            loop = asyncio.get_event_loop()
+            claude_md_content = await loop.run_in_executor(
+                None, lambda: Path(claude_md_path).read_text(encoding="utf-8")
+            )
             base_prompt += f"""
 
 {claude_md_content}"""
@@ -159,21 +143,39 @@ class TerminalApp:
             theme=Theme({"markdown.code": "cyan"}),
         )
     )
-    api: ClaudeCodeAPI | GeminiAPI | None = None
+    api: ClaudeCodeAPI | GeminiAPI | CodexAPI | None = None
     use_gemini: bool = False
+    use_codex: bool = False
+    codex_model: str = "gpt-5.2-codex"
     gemini_model: str = "gemini-3-pro-preview"
     thinking_level: str = "low"
+    thinking_budget: int | None = 16000
     debug: bool = False
     continue_session: str | None = None
     dag: DAG | None = None
     tools: list[Tool] = field(default_factory=list)
     tool_map: dict[str, Tool] = field(default_factory=dict)
-    session: PromptSession[str] | None = None
+    command_router: CommandRouter = field(default_factory=CommandRouter)
+    session_store: SessionStore = field(default_factory=SessionStore)
     # Cancellation support
     cancel_token: CancellationToken = field(default_factory=CancellationToken)
-    input_handler: InputHandler = field(default=None, init=False)  # type: ignore
+    input_controller: InputController = field(default_factory=InputController)
+    dag_mapper: DAGMessageMapper = field(default_factory=DAGMessageMapper)
     # Message list for UI rendering
     message_list: MessageList = field(default_factory=MessageList)
+    # Auto-accept mode: when enabled, automatically confirms edit operations
+    auto_accept: bool = False
+    # Accumulated token stats
+    total_input_tokens: int = 0
+    total_output_tokens: int = 0
+    last_input_tokens: int = 0
+    last_output_tokens: int = 0
+    last_thinking_tokens: int = 0
+    # Concurrent execution support
+    pending_messages: asyncio.Queue[str] = field(default_factory=asyncio.Queue)
+    _execution_task: asyncio.Task[None] | None = field(
+        default=None, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         """Initialize tools after dataclass creation."""
@@ -188,15 +190,33 @@ class TerminalApp:
                 TodoWriteTool(),
                 WebFetchTool(),
                 PythonTool(),
+                AskUserQuestionTool(),
             ]
         self.tool_map = {tool.name: tool for tool in self.tools}
 
-        # Initialize input handler with escape -> cancel binding
-        self.input_handler = InputHandler(on_escape=self._on_escape_pressed)
+        # Initialize input controller with escape -> cancel binding
+        self.input_controller.on_escape = self._on_escape_pressed
+        # Initialize input controller with Shift+Tab -> toggle auto-accept binding
+        self.input_controller.on_toggle_auto_accept = self._toggle_auto_accept
 
     def _on_escape_pressed(self) -> None:
         """Called when Escape key is pressed during agent execution."""
         self.cancel_token.cancel()
+
+    def _toggle_auto_accept(self) -> None:
+        """Toggle auto-accept mode (called by Shift+Tab)."""
+        self.auto_accept = not self.auto_accept
+        # Sync with footer status bar
+        self.input_controller.update_status(auto_accept=self.auto_accept)
+
+    def _sync_status_to_footer(self) -> None:
+        """Sync current state to footer status bar."""
+        self.input_controller.update_status(
+            auto_accept=self.auto_accept,
+            input_tokens=self.last_input_tokens,
+            output_tokens=self.last_output_tokens,
+            thinking_tokens=self.last_thinking_tokens,
+        )
 
     def add_message(self, msg: UIMessage) -> UIMessage:
         """Add a message to the list and render it.
@@ -208,7 +228,11 @@ class TerminalApp:
             The added message
         """
         self.message_list.add(msg)
+        # Pause footer before printing to avoid overlap
+        self.input_controller.pause_footer()
         self.message_list.render_message(msg, self.console)
+        # Resume footer at new position after printing
+        self.input_controller.resume_footer()
         return msg
 
     def print_history(self, content: Text | Panel | RenderableType | str) -> None:
@@ -217,125 +241,23 @@ class TerminalApp:
         This is a legacy method for compatibility. Prefer using add_message()
         with UIMessage instances for new code.
         """
+        self.input_controller.pause_footer()
         self.console.print(content)
+        self.input_controller.resume_footer()
 
     def print_blank(self) -> None:
         """Print a blank line for visual separation."""
+        self.input_controller.pause_footer()
         self.console.print()
+        self.input_controller.resume_footer()
 
-    def _auto_save(self) -> None:
-        """Automatically save the conversation to the session file.
-
-        Saves silently to SESSION_FILE in the current directory after each
-        conversation turn. Errors are ignored to not interrupt the user.
-        """
-        if not self.dag or not self.dag._heads:
-            return
-        try:
-            filepath = Path.cwd() / SESSION_FILE
-            self.dag.save(filepath, session_id=datetime.now().isoformat())
-        except Exception:
-            # Silently ignore save errors to not interrupt the user
-            pass
+    async def _auto_save_async(self) -> None:
+        """Automatically save the conversation to the session file (async version)."""
+        await self.session_store.auto_save(self.dag)
 
     def _rebuild_message_list_from_dag(self) -> None:
-        """Rebuild the message list from the DAG.
-
-        This reconstructs the message list by iterating through the DAG
-        and creating UIMessage instances for each node.
-        """
-        self.message_list.clear()
-
-        if not self.dag or not self.dag._heads:
-            return
-
-        # Iterate through all nodes in causal order (parents before children)
-        for node in self.dag.head.ancestors():
-            if isinstance(node.data, Message):
-                if node.data.role == Role.USER:
-                    # User message - can be string or list of content blocks
-                    if isinstance(node.data.content, str):
-                        self.message_list.add(create_user_message(node.data.content))
-                    else:
-                        # Check what type of content blocks we have
-                        text_parts = []
-                        tool_results = []
-                        for block in node.data.content:
-                            if isinstance(block, TextContent):
-                                text_parts.append(block.text)
-                            elif isinstance(block, ToolResultContent):
-                                tool_results.append(block)
-
-                        # Create user message for text content
-                        if text_parts:
-                            self.message_list.add(
-                                create_user_message("\n".join(text_parts))
-                            )
-
-                        # Create tool result messages
-                        for tool_result in tool_results:
-                            if isinstance(tool_result.content, str):
-                                result_text = tool_result.content
-                            else:
-                                result_parts = []
-                                for content_block in tool_result.content:
-                                    if isinstance(content_block, TextContent):
-                                        result_parts.append(content_block.text)
-                                result_text = "\n".join(result_parts)
-                            is_error = (
-                                tool_result.is_error
-                                if hasattr(tool_result, "is_error")
-                                else False
-                            )
-                            self.message_list.add(
-                                create_tool_result_message(
-                                    result_text, is_error=is_error
-                                )
-                            )
-
-                elif node.data.role == Role.ASSISTANT:
-                    # Assistant message - may have thinking and text content
-                    if isinstance(node.data.content, str):
-                        if node.data.content.strip():
-                            msg = create_assistant_message()
-                            add_text_to_assistant(msg, node.data.content)
-                            self.message_list.add(msg)
-                    else:
-                        # Process content blocks
-                        thinking_blocks = []
-                        text_parts = []
-                        tool_uses = []
-
-                        for block in node.data.content:
-                            if isinstance(block, ThinkingContent):
-                                if block.thinking:
-                                    thinking_blocks.append(block.thinking)
-                            elif isinstance(block, TextContent):
-                                if block.text.strip():
-                                    text_parts.append(block.text)
-                            elif isinstance(block, ToolUseContent):
-                                tool_uses.append(block)
-
-                        # Create assistant message with thinking and text
-                        if thinking_blocks or text_parts:
-                            msg = create_assistant_message()
-                            for thinking in thinking_blocks:
-                                add_thinking_to_assistant(msg, thinking)
-                            if text_parts:
-                                add_text_to_assistant(
-                                    msg,
-                                    "\n".join(text_parts),
-                                    has_thinking=bool(thinking_blocks),
-                                )
-                            self.message_list.add(msg)
-
-                        # Create tool call messages
-                        for tool_use in tool_uses:
-                            self.message_list.add(
-                                create_tool_call_message(
-                                    tool_use.name, tool_use.input or {}
-                                )
-                            )
+        """Rebuild the message list from the DAG."""
+        self.message_list = self.dag_mapper.rebuild(self.dag)
 
     def render_history(self) -> None:
         """Re-render all messages from the DAG.
@@ -359,6 +281,8 @@ class TerminalApp:
         Returns:
             True if initialization successful, False otherwise.
         """
+        if self.use_codex:
+            return await self._initialize_codex_api()
         if self.use_gemini:
             return await self._initialize_gemini_api()
         else:
@@ -370,7 +294,7 @@ class TerminalApp:
 
         try:
             try:
-                self.api = ClaudeCodeAPI()
+                self.api = ClaudeCodeAPI(thinking_budget=self.thinking_budget)
             except ValueError:
                 # No saved config - capture credentials first
                 self.add_message(
@@ -380,18 +304,17 @@ class TerminalApp:
                 )
                 if not await self._refresh_token():
                     return False
+                self.api = ClaudeCodeAPI(thinking_budget=self.thinking_budget)
 
             # Set up main DAG
             model = self.api.model
-            system_prompt, claude_md_loaded = build_system_prompt(model)
-            self.dag = DAG().system(system_prompt).tools(*self.tools)
+            claude_md_loaded = await self._build_dag_for_model(model)
 
             self.add_message(create_system_message(f"Connected using {model}"))
             if claude_md_loaded:
                 self.add_message(
                     create_system_message("Loaded CLAUDE.md into system prompt")
                 )
-            self.print_blank()
             return True
 
         except RuntimeError as e:
@@ -414,14 +337,12 @@ class TerminalApp:
                 thinking_level=self.thinking_level,
             )
             model = self.api.model
-            system_prompt, claude_md_loaded = build_system_prompt(model)
-            self.dag = DAG().system(system_prompt).tools(*self.tools)
+            claude_md_loaded = await self._build_dag_for_model(model)
             self.add_message(create_system_message(f"Connected using {model}"))
             if claude_md_loaded:
                 self.add_message(
                     create_system_message("Loaded CLAUDE.md into system prompt")
                 )
-            self.print_blank()
             return True
 
         except ValueError as e:
@@ -433,6 +354,29 @@ class TerminalApp:
             )
             return False
 
+    async def _initialize_codex_api(self) -> bool:
+        """Initialize Codex API client."""
+        self.add_message(create_system_message("Connecting to Codex API..."))
+
+        try:
+            self.api = CodexAPI(model=self.codex_model)
+            model = self.api.model
+            claude_md_loaded = await self._build_dag_for_model(model)
+            self.add_message(create_system_message(f"Connected using {model}"))
+            if claude_md_loaded:
+                self.add_message(
+                    create_system_message("Loaded CLAUDE.md into system prompt")
+                )
+            return True
+        except ValueError as e:
+            self.add_message(create_error_message(str(e)))
+            self.add_message(
+                create_system_message(
+                    "Log in with Codex and ensure auth is stored in file mode."
+                )
+            )
+            return False
+
     async def _refresh_token(self) -> bool:
         """Refresh OAuth token by capturing from Claude CLI.
 
@@ -440,11 +384,11 @@ class TerminalApp:
             True if refresh successful, False otherwise.
         """
         try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: get_config(timeout=30))
+            # Use async version directly - no thread pool overhead
+            await async_get_config(timeout=30)
 
             # Re-create API with new token
-            self.api = ClaudeCodeAPI()
+            self.api = ClaudeCodeAPI(thinking_budget=self.thinking_budget)
             self.add_message(create_system_message("Token refreshed."))
             return True
 
@@ -459,63 +403,28 @@ class TerminalApp:
             self.add_message(create_error_message(f"Token refresh failed: {e}"))
             return False
 
+    async def _build_dag_for_model(self, model: str) -> bool:
+        """Create a fresh DAG for a given model and return CLAUDE.md status."""
+        system_prompt, claude_md_loaded = await build_system_prompt_async(model)
+        self.dag = DAG().system(system_prompt).tools(*self.tools)
+        return claude_md_loaded
+
     async def get_user_input(self) -> str | None:
-        """Get user input using prompt_toolkit.
+        """Get user input using the active-element system.
 
         Returns:
             User input string, or None if user wants to quit (Ctrl+D).
 
         Multiline support:
             - Enter: Submit message
-            - Ctrl+J: Add new line
+            - \\ + Enter: Add new line
         """
-        if self.session is None:
-            # Create key bindings for multiline support
-            bindings = KeyBindings()
-
-            @bindings.add(Keys.ControlJ)
-            def insert_newline(event: KeyPressEvent) -> None:
-                """Insert a newline character (Ctrl+J)."""
-                event.current_buffer.insert_text("\n")
-
-            # Use FileHistory for persistent history across sessions
-            history_path = Path.home() / ".nano-cli-history"
-            self.session = PromptSession(
-                history=FileHistory(str(history_path)),
-                key_bindings=bindings,
-            )
-
-        try:
-            # Run prompt in executor to avoid blocking asyncio
-            loop = asyncio.get_event_loop()
-            # Style to make bottom_toolbar invisible (no background)
-            invisible_toolbar_style = Style.from_dict({"bottom-toolbar": "noreverse"})
-            text = await loop.run_in_executor(
-                None,
-                lambda: self.session.prompt(  # type: ignore[union-attr]
-                    "> ", bottom_toolbar=" ", style=invisible_toolbar_style
-                ),
-            )
-            if text:
-                # Clear the echoed input line(s) so we can reprint with formatting
-                # Count lines: 1 for the prompt + any newlines in input + 1 for bottom_toolbar
-                try:
-                    line_count = 2 + text.count("\n")
-                    for _ in range(line_count):
-                        # Move cursor up and clear the line
-                        self.console.file.write("\033[A\033[2K")
-                    self.console.file.flush()
-                except (OSError, IOError):
-                    pass  # Terminal doesn't support ANSI - skip clearing
-            return text.strip() if text else None
-        except EOFError:
-            # Ctrl+D pressed - signal to exit
+        text = await self.input_controller.prompt_text(prompt="> ")
+        if text is None:
             return None
-        except KeyboardInterrupt:
-            # Ctrl+C pressed - just return empty to continue loop
-            return ""
+        return text
 
-    def handle_command(self, command: str) -> bool:
+    async def handle_command(self, command: str) -> bool:
         """Handle a slash command.
 
         Args:
@@ -524,121 +433,36 @@ class TerminalApp:
         Returns:
             True if app should continue, False if should quit.
         """
-        cmd = command.lower().strip()
 
-        if cmd in ("/quit", "/exit", "/q"):
-            return False
-
-        if cmd == "/clear":
-            # Clear screen, reset conversation, and message list
+        async def _clear_and_reset() -> bool:
             self.message_list.clear()
             self.console.clear()
-            claude_md_loaded = False
             if self.dag and self.api:
                 model = self.api.model
-                system_prompt, claude_md_loaded = build_system_prompt(model)
-                self.dag = DAG().system(system_prompt).tools(*self.tools)
-            self.add_message(create_system_message("Conversation reset."))
-            if claude_md_loaded:
-                self.add_message(
-                    create_system_message("Loaded CLAUDE.md into system prompt")
-                )
-            return True
-
-        if cmd == "/render":
-            # Re-render all history using message list (useful after terminal resize)
-            self.message_list.full_redraw(self.console)
-            return True
-
-        if cmd == "/help":
-            help_text = """Commands:
-  /quit, /exit, /q - Exit the application
-  /clear - Reset conversation and clear screen
-  /continue, /c - Continue agent execution without user message
-  /renew - Refresh OAuth token (use when getting 401 errors)
-  /render - Re-render history (useful after terminal resize)
-  /debug - Show DAG as JSON
-  /save [filename] - Save session to file (default: session.json)
-  /load [filename] - Load session from file (default: session.json)
-  /help - Show this help message
-
-Input:
-  Enter - Send message
-  Ctrl+J - Insert new line (for multiline input)
-  Esc - Cancel current operation (during execution)
-  Ctrl+D - Exit"""
-            self.add_message(create_system_message(help_text))
-            return True
-
-        if cmd == "/debug":
-            if self.dag and self.dag._heads:
-                # Build graph structure similar to Node.save_graph
-                all_nodes: dict[str, Any] = {}
-                for node in self.dag.head.ancestors():
-                    all_nodes[node.id] = node.to_dict()
-                graph_data = {
-                    "head_ids": [h.id for h in self.dag._heads],
-                    "nodes": all_nodes,
-                }
-                dag_json = json.dumps(graph_data, indent=2, default=str)
-                self.print_history(JSON(dag_json))
-            else:
-                self.add_message(create_system_message("No DAG initialized."))
-            return True
-
-        # /save [filename] - Save the current DAG to a file
-        if cmd.startswith("/save"):
-            parts = command.strip().split(maxsplit=1)
-            filename = parts[1] if len(parts) > 1 else "session.json"
-            if not filename.endswith(".json"):
-                filename += ".json"
-            if self.dag and self.dag._heads:
-                try:
-                    filepath = Path(filename).resolve()
-                    self.dag.save(filepath, session_id=datetime.now().isoformat())
+                claude_md_loaded = await self._build_dag_for_model(model)
+                if claude_md_loaded:
                     self.add_message(
-                        create_system_message(f"Session saved to: {filepath}")
+                        create_system_message("Loaded CLAUDE.md into system prompt")
                     )
-                except Exception as e:
-                    self.add_message(create_error_message(f"Failed to save: {e}"))
+            ctx.dag = self.dag
+            return True
+
+        ctx = CommandContext(
+            dag=self.dag,
+            session_store=self.session_store,
+            tools=self.tools,
+            render_history=self.render_history,
+            clear_and_reset=_clear_and_reset,
+            refresh_token=self._refresh_token,
+        )
+        should_continue, messages = await self.command_router.handle(command, ctx)
+        self.dag = ctx.dag
+        for message in messages:
+            if isinstance(message, UIMessage):
+                self.add_message(message)
             else:
-                self.add_message(create_system_message("No DAG to save."))
-            return True
-
-        # /load [filename] - Load a DAG from a file
-        if cmd.startswith("/load"):
-            parts = command.strip().split(maxsplit=1)
-            filename = parts[1] if len(parts) > 1 else "session.json"
-            if not filename.endswith(".json"):
-                filename += ".json"
-            filepath = Path(filename).resolve()
-            if not filepath.exists():
-                self.add_message(create_error_message(f"File not found: {filepath}"))
-                return True
-            try:
-                loaded_dag, metadata = DAG.load(filepath)
-                # Restore tools to the loaded DAG
-                if self.tools:
-                    loaded_dag = loaded_dag.tools(*self.tools)
-                self.dag = loaded_dag
-                session_id = metadata.get("session_id", "unknown")
-                node_count = len(metadata.get("nodes", {}))
-                # Render the loaded session history
-                self.render_history()
-                self.add_message(
-                    create_system_message(
-                        f"Session loaded from: {filepath}\n"
-                        f"  Session ID: {session_id}\n"
-                        f"  Nodes: {node_count}"
-                    )
-                )
-            except Exception as e:
-                self.add_message(create_error_message(f"Failed to load: {e}"))
-            return True
-
-        self.add_message(create_error_message(f"Unknown command: {command}"))
-        self.add_message(create_system_message("Type /help for available commands."))
-        return True
+                self.print_history(message)
+        return should_continue
 
     async def _edit_permission_callback(
         self, file_path: str, preview: str, match_count: int
@@ -653,17 +477,26 @@ Input:
         Returns:
             True if the user allows the edit, False otherwise.
         """
-        # Create permission message with the preview
+        # Create permission message with the preview (displayed in message history)
         permission_msg = create_permission_message(file_path, match_count, preview)
         self.add_message(permission_msg)
 
-        # Prompt for confirmation using single-character input
-        self.console.print("Allow this edit? (y/n/esc): ", end="", style="yellow")
+        # If auto-accept mode is enabled, automatically approve the edit
+        if self.auto_accept:
+            self.console.print("[green]Auto-accepted[/green]")
+            return True
 
-        result = await self.input_handler.prompt_yn()
-
-        # Print newline after single-char input
-        self.console.print()
+        # Pause escape listener to avoid competing raw readers during prompt
+        was_running = self.input_controller.is_running()
+        if was_running:
+            await self.input_controller.stop()
+        try:
+            result = await self.input_controller.confirm(
+                message=f"Allow edit to {file_path}?"
+            )
+        finally:
+            if was_running:
+                await self.input_controller.start()
 
         if result is None:
             # Escape pressed - cancel the operation
@@ -671,6 +504,182 @@ Input:
             return False
 
         return result
+
+    async def _handle_user_question(self, tool_call: ToolUseContent) -> None:
+        """Handle AskUserQuestion tool calls with interactive prompts."""
+        if not self.dag:
+            return
+
+        try:
+            tool = self.tool_map.get(tool_call.name)
+            typed_input = tool_call.input or {}
+            if tool and getattr(tool, "_input_type", None):
+                typed_input = convert_input(tool_call.input, tool._input_type)
+
+            if not hasattr(typed_input, "questions"):
+                error_result = TextContent(
+                    text="AskUserQuestion: invalid input (missing questions)"
+                )
+                self.add_message(
+                    create_tool_result_message(error_result.text, is_error=True)
+                )
+                self.dag = self.dag.tool_result(
+                    ToolResultContent(
+                        tool_use_id=tool_call.id,
+                        content=[error_result],
+                        is_error=True,
+                    )
+                )
+                return
+
+            questions = typed_input.questions
+            if not questions:
+                error_result = TextContent(
+                    text="AskUserQuestion: no questions provided"
+                )
+                self.add_message(
+                    create_tool_result_message(error_result.text, is_error=True)
+                )
+                self.dag = self.dag.tool_result(
+                    ToolResultContent(
+                        tool_use_id=tool_call.id,
+                        content=[error_result],
+                        is_error=True,
+                    )
+                )
+                return
+
+            question = questions[0]
+            self.add_message(
+                create_question_message(f"{question.header}: {question.question}")
+            )
+
+            options = [q.label for q in question.options]
+            custom_label = None
+            if getattr(question, "allowCustom", False):
+                custom_label = getattr(question, "customLabel", "Other...")
+                options = options + [custom_label]
+
+            # Pause escape listener to avoid competing raw readers during prompt
+            was_running = self.input_controller.is_running()
+            if was_running:
+                await self.input_controller.stop()
+            try:
+                selection = await self.input_controller.select(
+                    title=question.question,
+                    options=options,
+                    multi_select=question.multiSelect,
+                )
+                if selection is None:
+                    # Escape pressed - cancel the operation
+                    self.cancel_token.cancel()
+                    cancelled = TextContent(text="Operation cancelled by user.")
+                    self.add_message(
+                        create_tool_result_message(cancelled.text, is_error=True)
+                    )
+                    self.dag = self.dag.tool_result(
+                        ToolResultContent(
+                            tool_use_id=tool_call.id,
+                            content=[cancelled],
+                            is_error=True,
+                        )
+                    )
+                    return
+
+                if question.multiSelect:
+                    chosen = selection if isinstance(selection, list) else [selection]
+                    custom_selected = custom_label and custom_label in chosen
+                    if custom_selected:
+                        chosen = [c for c in chosen if c != custom_label]
+                        custom_prompt = getattr(
+                            question, "customPrompt", "Your answer: "
+                        )
+                        custom_text = await self.input_controller.prompt_text(
+                            prompt=custom_prompt
+                        )
+                        if custom_text is None:
+                            self.cancel_token.cancel()
+                            cancelled = TextContent(text="Operation cancelled by user.")
+                            self.add_message(
+                                create_tool_result_message(
+                                    cancelled.text, is_error=True
+                                )
+                            )
+                            self.dag = self.dag.tool_result(
+                                ToolResultContent(
+                                    tool_use_id=tool_call.id,
+                                    content=[cancelled],
+                                    is_error=True,
+                                )
+                            )
+                            return
+                        if custom_text:
+                            chosen.append(custom_text)
+                    if not chosen and custom_selected:
+                        chosen.append(custom_label or "")
+                    result_text = ", ".join(c for c in chosen if c)
+                else:
+                    selected = selection if isinstance(selection, str) else ""
+                    if custom_label and selected == custom_label:
+                        custom_prompt = getattr(
+                            question, "customPrompt", "Your answer: "
+                        )
+                        custom_text = await self.input_controller.prompt_text(
+                            prompt=custom_prompt
+                        )
+                        if custom_text is None:
+                            self.cancel_token.cancel()
+                            cancelled = TextContent(text="Operation cancelled by user.")
+                            self.add_message(
+                                create_tool_result_message(
+                                    cancelled.text, is_error=True
+                                )
+                            )
+                            self.dag = self.dag.tool_result(
+                                ToolResultContent(
+                                    tool_use_id=tool_call.id,
+                                    content=[cancelled],
+                                    is_error=True,
+                                )
+                            )
+                            return
+                        if custom_text:
+                            selected = custom_text
+                    result_text = selected
+            finally:
+                if was_running:
+                    await self.input_controller.start()
+
+            result = TextContent(text=result_text)
+            self.add_message(create_tool_result_message(result.text))
+            self.dag = self.dag.tool_result(
+                ToolResultContent(tool_use_id=tool_call.id, content=[result])
+            )
+        except asyncio.CancelledError:
+            cancelled_result = TextContent(text="Operation cancelled by user.")
+            self.add_message(
+                create_tool_result_message(cancelled_result.text, is_error=True)
+            )
+            self.dag = self.dag.tool_result(
+                ToolResultContent(
+                    tool_use_id=tool_call.id,
+                    content=[cancelled_result],
+                    is_error=True,
+                )
+            )
+            raise
+        except Exception as e:
+            error_result = TextContent(text=f"Tool error: {e}")
+            self.add_message(
+                create_tool_result_message(error_result.text, is_error=True)
+            )
+            self.dag = self.dag.tool_result(
+                ToolResultContent(
+                    tool_use_id=tool_call.id,
+                    content=[error_result],
+                    is_error=True,
+                )
+            )
 
     async def _execute_tool(self, tool_call: ToolUseContent) -> None:
         """Execute a tool call with cancellation support."""
@@ -681,6 +690,10 @@ Input:
         self.add_message(
             create_tool_call_message(tool_call.name, tool_call.input or {})
         )
+
+        if tool_call.name == "AskUserQuestion":
+            await self._handle_user_question(tool_call)
+            return
 
         tool = self.tool_map.get(tool_call.name)
         if not tool:
@@ -725,6 +738,27 @@ Input:
                     tool_use_id=tool_call.id, content=[error_result], is_error=True
                 )
             )
+
+    async def _execute_tool_with_status(self, tool_call: ToolUseContent) -> None:
+        """Execute a tool call with status bar showing tool name.
+
+        Uses footer status bar to show the tool being executed.
+        """
+        if not self.dag:
+            return
+
+        # Show activity in footer status bar
+        self.input_controller.set_activity(f"Running {tool_call.name}...")
+        escape_task = asyncio.create_task(self._check_for_escape())
+        try:
+            await self._execute_tool(tool_call)
+        finally:
+            self.input_controller.set_activity(None)
+            escape_task.cancel()
+            try:
+                await escape_task
+            except asyncio.CancelledError:
+                pass
 
     def _render_response(self, response: Response) -> UIMessage:
         """Render assistant response (thinking, text, token count).
@@ -771,36 +805,73 @@ Input:
         msg.metadata["input_tokens"] = response.usage.input_tokens
         msg.metadata["output_tokens"] = response.usage.output_tokens
 
+        # Track last-step token stats (for footer)
+        self.last_input_tokens = response.usage.input_tokens
+        self.last_output_tokens = response.usage.output_tokens
+        self.last_thinking_tokens = (
+            response.usage.reasoning_tokens
+            if response.usage.reasoning_tokens
+            else response.usage.cache_creation_input_tokens
+        )
+
+        # Update footer status bar with new token counts
+        self._sync_status_to_footer()
+
         return self.add_message(msg)
 
     async def _check_for_escape(self) -> None:
         """Background task to poll for Escape key during API calls.
 
-        prompt_toolkit's escape sequence disambiguation requires polling
-        rather than pure callback-based detection, since the callback
-        fires on raw input but read_keys() may not return the Escape
-        until after the disambiguation timeout.
+        Uses raw input polling to detect Escape during long operations.
         """
-        if not self.input_handler._input or not self.input_handler._running:
+        if not self.input_controller.is_running():
             return
 
         while not self.cancel_token.is_cancelled:
-            await asyncio.sleep(0.02)  # Poll every 20ms for faster response
-            if not self.input_handler._running:
+            if not self.input_controller.is_running():
                 break
-            # Don't consume input if prompt_yn() is active
-            if self.input_handler._prompting:
-                continue
+            await self.input_controller.poll_escape(timeout=0.05)
+            if self.cancel_token.is_cancelled:
+                return
 
-            # Force flush to reduce escape sequence disambiguation delay
-            inp = self.input_handler._input
-            if isinstance(inp, Vt100Input) and hasattr(inp, "vt100_parser"):
-                inp.vt100_parser.flush()
+    async def _agent_loop_concurrent(self) -> None:
+        """Run agent loop suitable for concurrent input mode.
 
-            for key_press in self.input_handler._input.read_keys():
-                if key_press.key == Keys.Escape:
-                    self.cancel_token.cancel()
-                    return
+        Uses footer status bar for spinner during API calls and tool execution.
+        Output is printed directly and appears above the prompt.
+        """
+        if not self.api or not self.dag:
+            return
+
+        # Sync initial status to footer
+        self._sync_status_to_footer()
+
+        while True:
+            # Show activity in footer
+            self.input_controller.set_activity("Thinking...")
+            escape_task = asyncio.create_task(self._check_for_escape())
+            try:
+                response = await self.cancel_token.run(self.api.send(self.dag))
+            finally:
+                self.input_controller.set_activity(None)
+                escape_task.cancel()
+                try:
+                    await escape_task
+                except asyncio.CancelledError:
+                    pass
+
+            # Update DAG and render response
+            self.dag = self.dag.assistant(response.content)
+            self._render_response(response)
+
+            # Check for tool calls
+            tool_calls = response.get_tool_use()
+            if not tool_calls:
+                break
+
+            # Execute tools with footer status
+            for tool_call in tool_calls:
+                await self._execute_tool_with_status(tool_call)
 
     async def _agent_loop(self) -> None:
         """Run agent loop with cancellation support.
@@ -808,25 +879,25 @@ Input:
         Continuously sends requests to API and executes tool calls until
         no more tool calls are returned or operation is cancelled.
 
-        Uses InputHandler to detect Escape key for cancellation.
+        Uses InputController to detect Escape key for cancellation.
+        Shows unified footer status bar with spinner, auto-accept status, and token counts.
         """
         if not self.api or not self.dag:
             return
 
-        # Start input handler to detect Escape key during execution
-        async with self.input_handler:
+        # Start input controller to detect Escape key during execution
+        async with self.input_controller:
+            # Sync initial status to footer
+            self._sync_status_to_footer()
+
             while True:
-                # API call with spinner, polling for Escape in background
+                # API call with footer status bar, polling for Escape in background
+                self.input_controller.set_activity("Thinking...")
                 escape_task = asyncio.create_task(self._check_for_escape())
                 try:
-                    with Live(
-                        Spinner("dots", text="Thinking... (Esc to cancel)"),
-                        console=self.console,
-                        refresh_per_second=10,
-                        transient=True,
-                    ):
-                        response = await self.cancel_token.run(self.api.send(self.dag))
+                    response = await self.cancel_token.run(self.api.send(self.dag))
                 finally:
+                    self.input_controller.set_activity(None)
                     escape_task.cancel()
                     try:
                         await escape_task
@@ -842,9 +913,9 @@ Input:
                 if not tool_calls:
                     break
 
-                # Execute tools
+                # Execute tools with status bar showing tool name
                 for tool_call in tool_calls:
-                    await self._execute_tool(tool_call)
+                    await self._execute_tool_with_status(tool_call)
 
     async def _run_agent_with_error_handling(self) -> None:
         """Run agent loop with error handling, auto-save, and visual formatting."""
@@ -852,13 +923,15 @@ Input:
             await self._agent_loop()
         except (KeyboardInterrupt, asyncio.CancelledError):
             self.cancel_token.cancel()
-            self.dag = self.dag.user("[Operation cancelled by user]")
+            if self.dag:
+                self.dag = self.dag.user("[Operation cancelled by user]")
             self.add_message(create_error_message("Operation cancelled."))
         except Exception as e:
             self.add_message(create_error_message(f"API error: {e}"))
 
         self.print_blank()
-        self._auto_save()
+        # Fire-and-forget background auto-save
+        asyncio.create_task(self._auto_save_async())
 
     async def send_message(self, text: str) -> None:
         """Send a user message and handle the response with agent loop."""
@@ -887,10 +960,57 @@ Input:
 
         await self._run_agent_with_error_handling()
 
+    async def _run_agent_concurrent(self) -> None:
+        """Run agent loop with error handling (concurrent mode).
+
+        Uses line-based status instead of Rich Live to allow concurrent input.
+        """
+        try:
+            async with self.input_controller:
+                await self._agent_loop_concurrent()
+        except (KeyboardInterrupt, asyncio.CancelledError):
+            self.cancel_token.cancel()
+            if self.dag:
+                self.dag = self.dag.user("[Operation cancelled by user]")
+            self.add_message(create_error_message("Operation cancelled."))
+        except Exception as e:
+            self.add_message(create_error_message(f"API error: {e}"))
+
+        self.print_blank()
+        # Fire-and-forget background auto-save
+        asyncio.create_task(self._auto_save_async())
+
+    async def _process_queue(self) -> None:
+        """Process all queued messages (background execution task)."""
+        while not self.pending_messages.empty():
+            text = await self.pending_messages.get()
+            if not self.dag:
+                self.add_message(create_error_message("DAG not initialized"))
+                continue
+            self.cancel_token.reset()
+            self.add_message(create_user_message(text))
+            self.dag = self.dag.user(text)
+            await self._run_agent_concurrent()
+
+    def _is_execution_running(self) -> bool:
+        """Check if execution task is currently running."""
+        return self._execution_task is not None and not self._execution_task.done()
+
+    async def _wait_for_execution(self) -> None:
+        """Wait for current execution to complete."""
+        if self._execution_task is not None:
+            try:
+                await self._execution_task
+            except Exception:
+                pass  # Errors already handled in _run_agent_concurrent
+            self._execution_task = None
+
     async def cleanup(self) -> None:
         """Clean up resources."""
         if self.api and hasattr(self.api, "client"):
             await self.api.client.aclose()
+        if self.api and hasattr(self.api, "_client"):
+            await self.api._client.aclose()
 
     async def run(self) -> None:
         """Main application loop."""
@@ -904,43 +1024,50 @@ Input:
 
             # Load session if --continue was specified
             if self.continue_session:
-                filename = self.continue_session
-                if not filename.endswith(".json"):
-                    filename += ".json"
-                filepath = Path(filename).resolve()
-                if not filepath.exists():
-                    self.add_message(
-                        create_error_message(f"Session file not found: {filepath}")
+                try:
+                    loaded_dag, metadata, filepath = await self.session_store.load(
+                        self.continue_session
                     )
-                else:
-                    try:
-                        loaded_dag, metadata = DAG.load(filepath)
-                        # Restore tools to the loaded DAG
-                        if self.tools:
-                            loaded_dag = loaded_dag.tools(*self.tools)
-                        self.dag = loaded_dag
-                        session_id = metadata.get("session_id", "unknown")
-                        node_count = len(metadata.get("nodes", {}))
-                        # Render the loaded session history
-                        self.render_history()
-                        self.add_message(
-                            create_system_message(
-                                f"Continuing session from: {filepath}\n"
-                                f"  Session ID: {session_id}\n"
-                                f"  Nodes: {node_count}"
-                            )
+                    if self.tools:
+                        loaded_dag = loaded_dag.tools(*self.tools)
+                    self.dag = loaded_dag
+                    session_id = metadata.get("session_id", "unknown")
+                    node_count = len(metadata.get("nodes", {}))
+                    self.render_history()
+                    self.add_message(
+                        create_system_message(
+                            f"Continuing session from: {filepath}\n"
+                            f"  Session ID: {session_id}\n"
+                            f"  Nodes: {node_count}"
                         )
-                    except Exception as e:
-                        self.add_message(
-                            create_error_message(f"Failed to load session: {e}")
-                        )
+                    )
+                except FileNotFoundError as e:
+                    self.add_message(create_error_message(str(e)))
+                except Exception as e:
+                    self.add_message(
+                        create_error_message(f"Failed to load session: {e}")
+                    )
 
-            # Main input loop
+            # Main input loop (prompt only when execution is idle)
             while True:
+                # If there's a pending execution and it's done, clean up
+                if self._execution_task is not None and self._execution_task.done():
+                    try:
+                        await self._execution_task
+                    except Exception:
+                        pass  # Errors already handled
+                    self._execution_task = None
+
+                # Wait for any running execution before showing prompt
+                if self._is_execution_running():
+                    await self._wait_for_execution()
+
+                # Get user input
                 user_input = await self.get_user_input()
 
                 if user_input is None:
-                    # User pressed Ctrl+D
+                    # User pressed Ctrl+D - wait for execution to finish first
+                    await self._wait_for_execution()
                     self.print_blank()
                     self.add_message(create_system_message("Goodbye!"))
                     break
@@ -951,23 +1078,29 @@ Input:
                 # Handle async commands (need special handling)
                 cmd = user_input.lower().strip()
                 if cmd in ("/continue", "/c"):
+                    # Wait for any running execution first
+                    await self._wait_for_execution()
                     await self.continue_agent()
                     continue
 
-                if cmd == "/renew":
-                    await self._refresh_token()
-                    continue
-
-                # Handle sync slash commands
+                # Handle slash commands - wait for execution first
                 if user_input.startswith("/"):
-                    if not self.handle_command(user_input):
+                    await self._wait_for_execution()
+                    if not await self.handle_command(user_input):
                         self.add_message(create_system_message("Goodbye!"))
                         break
                     continue
 
-                # Send message to Claude
-                await self.send_message(user_input)
+                # Queue message for processing
+                await self.pending_messages.put(user_input)
+
+                # Start execution task if not already running
+                if not self._is_execution_running():
+                    self._execution_task = asyncio.create_task(self._process_queue())
         finally:
+            # Wait for execution to complete before cleanup
+            await self._wait_for_execution()
+            await self.input_controller.stop()
             await self.cleanup()
 
 
@@ -976,6 +1109,13 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="nano-cli")
+    parser.add_argument(
+        "--codex",
+        metavar="MODEL",
+        nargs="?",
+        const="gpt-5.2-codex",
+        help="Use Codex ChatGPT OAuth API (default model: gpt-5.2-codex)",
+    )
     parser.add_argument(
         "--gemini",
         metavar="MODEL",
@@ -988,6 +1128,12 @@ def main() -> None:
         choices=["off", "low", "medium", "high"],
         default="low",
         help="Gemini thinking level (default: low)",
+    )
+    parser.add_argument(
+        "--thinking-budget",
+        type=int,
+        default=16000,
+        help="Claude thinking budget tokens (Claude Code only)",
     )
     parser.add_argument(
         "--debug",
@@ -1004,10 +1150,16 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    use_codex = args.codex is not None
+    use_gemini = args.gemini is not None and not use_codex
+
     app = TerminalApp(
-        use_gemini=args.gemini is not None,
+        use_codex=use_codex,
+        codex_model=args.codex or "gpt-5.2-codex",
+        use_gemini=use_gemini,
         gemini_model=args.gemini or "gemini-3-pro-preview",
         thinking_level=args.thinking_level,
+        thinking_budget=args.thinking_budget,
         debug=args.debug,
         continue_session=args.continue_session,
     )

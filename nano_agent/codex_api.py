@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Sequence
 from typing import Any
 
@@ -35,6 +36,7 @@ class CodexAPI:
         model: str = "gpt-5.2-codex",
         base_url: str = "https://chatgpt.com/backend-api/codex/responses",
         parallel_tool_calls: bool = True,
+        reasoning: bool = True,
     ) -> None:
         resolved = auth_token or get_codex_access_token()
         if not resolved:
@@ -47,6 +49,7 @@ class CodexAPI:
         self.model = model
         self.base_url = base_url
         self.parallel_tool_calls = parallel_tool_calls
+        self.reasoning = reasoning
         self._client = httpx.AsyncClient(timeout=60.0)
 
     def __repr__(self) -> str:
@@ -131,10 +134,25 @@ class CodexAPI:
         }
         params = schema.get("parameters")
         if isinstance(params, dict):
-            props = params.get("properties")
-            if isinstance(props, dict):
-                params["required"] = list(props.keys())
+            self._force_required_all(params)
         return schema
+
+    def _force_required_all(self, schema: dict[str, Any]) -> None:
+        """Ensure required includes all properties (Codex strict schema)."""
+        if schema.get("type") == "object":
+            props = schema.get("properties")
+            if isinstance(props, dict):
+                schema["required"] = list(props.keys())
+                for prop in props.values():
+                    if isinstance(prop, dict):
+                        self._force_required_all(prop)
+            additional = schema.get("additionalProperties")
+            if isinstance(additional, dict):
+                self._force_required_all(additional)
+        elif schema.get("type") == "array":
+            items = schema.get("items")
+            if isinstance(items, dict):
+                self._force_required_all(items)
 
     async def send(
         self,
@@ -166,6 +184,11 @@ class CodexAPI:
             "stream": True,
         }
 
+        # Add reasoning if enabled
+        if self.reasoning:
+            request_body["reasoning"] = {"effort": "high", "summary": "detailed"}
+            request_body["include"] = ["reasoning.encrypted_content"]
+
         if tools:
             request_body["tools"] = [self._convert_tool_to_codex(t) for t in tools]
             request_body["parallel_tool_calls"] = self.parallel_tool_calls
@@ -190,6 +213,41 @@ class CodexAPI:
             },
             json=request_body,
         ) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                snippet = body.decode("utf-8", errors="ignore")[:400]
+                raise RuntimeError(
+                    f"Codex API HTTP {resp.status_code}: {snippet or 'empty response'}"
+                )
+
+            content_type = resp.headers.get("content-type", "")
+            if "text/event-stream" not in content_type:
+                data = await resp.aread()
+                text = data.decode("utf-8", errors="ignore")
+                if os.environ.get("NANO_CLI_DEBUG_HTTP") == "1":
+                    headers_preview = dict(resp.headers)
+                    print(
+                        f"\n[debug] Codex non-SSE content-type: {content_type!r}, "
+                        f"headers={headers_preview}\n"
+                    )
+                if "data:" in text:
+                    parsed = self._parse_sse_text(text)
+                    if parsed is not None:
+                        return parsed
+                try:
+                    payload = json.loads(data)
+                except json.JSONDecodeError:
+                    snippet = text[:400]
+                    raise RuntimeError(
+                        f"Codex API non-stream response: {snippet or 'empty response'}"
+                    )
+                if isinstance(payload, dict) and payload.get("error"):
+                    raise RuntimeError(f"Codex API error: {payload['error']}")
+                if isinstance(payload, dict) and payload.get("response"):
+                    return payload.get("response")
+                return payload if isinstance(payload, dict) else None
+
+            last_event_type: str | None = None
             async for line in resp.aiter_lines():
                 if not line:
                     continue
@@ -202,10 +260,34 @@ class CodexAPI:
                     event = json.loads(payload)
                 except json.JSONDecodeError:
                     continue
+                last_event_type = event.get("type")
                 if event.get("type") == "response.completed":
                     last_response = event.get("response")
                 if event.get("error"):
                     raise RuntimeError(f"Codex API error: {event['error']}")
+            if last_response is None and last_event_type:
+                raise RuntimeError(
+                    f"No response received from Codex endpoint (last event: {last_event_type})."
+                )
+        return last_response
+
+    def _parse_sse_text(self, text: str) -> dict[str, Any] | None:
+        """Parse SSE-formatted text and return last response if present."""
+        last_response: dict[str, Any] | None = None
+        for line in text.splitlines():
+            if not line.startswith("data: "):
+                continue
+            payload = line[6:]
+            if payload == "[DONE]":
+                break
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "response.completed":
+                last_response = event.get("response")
+            if event.get("error"):
+                raise RuntimeError(f"Codex API error: {event['error']}")
         return last_response
 
     def _parse_response(self, data: dict[str, Any]) -> Response:
@@ -249,11 +331,16 @@ class CodexAPI:
                 )
 
         usage_data = data.get("usage", {})
+        input_details = usage_data.get("input_tokens_details", {})
+        output_details = usage_data.get("output_tokens_details", {})
         usage = Usage(
             input_tokens=usage_data.get("input_tokens", 0),
             output_tokens=usage_data.get("output_tokens", 0),
             cache_creation_input_tokens=0,
             cache_read_input_tokens=0,
+            reasoning_tokens=output_details.get("reasoning_tokens", 0),
+            cached_tokens=input_details.get("cached_tokens", 0),
+            total_tokens=usage_data.get("total_tokens", 0),
         )
 
         status = data.get("status", "")

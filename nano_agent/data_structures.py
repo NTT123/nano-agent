@@ -375,6 +375,10 @@ class Usage:
     output_tokens: int = 0
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
+    # OpenAI/Codex specific fields
+    reasoning_tokens: int = 0
+    cached_tokens: int = 0
+    total_tokens: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return {
@@ -382,6 +386,9 @@ class Usage:
             "output_tokens": self.output_tokens,
             "cache_creation_input_tokens": self.cache_creation_input_tokens,
             "cache_read_input_tokens": self.cache_read_input_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "cached_tokens": self.cached_tokens,
+            "total_tokens": self.total_tokens,
         }
 
 

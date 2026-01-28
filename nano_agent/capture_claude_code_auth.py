@@ -262,7 +262,7 @@ def _filter_long_system_messages(
     filtered_system = [
         item
         for item in system
-        if not isinstance(item, dict) or _count_words(item.get("text", "")) <= max_words
+        # if not isinstance(item, dict) or _count_words(item.get("text", "")) <= max_words
     ]
 
     return {**body_params, "system": filtered_system}

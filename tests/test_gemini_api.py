@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from nano_agent import (
+    APIError,
     DAG,
     Message,
     Response,
@@ -136,7 +137,7 @@ class TestMessageConversion:
         assert result["role"] == "model"
         assert len(result["parts"]) == 1
         assert result["parts"][0] == {
-            "functionCall": {"name": "get_weather", "args": {"location": "NYC"}}
+            "function_call": {"name": "get_weather", "args": {"location": "NYC"}}
         }
         # Tool name should be tracked
         assert tool_name_map["call_123"] == "get_weather"
@@ -159,7 +160,7 @@ class TestMessageConversion:
         assert result["role"] == "user"
         assert len(result["parts"]) == 1
         assert result["parts"][0] == {
-            "functionResponse": {
+            "function_response": {
                 "name": "get_weather",
                 "response": {"output": "72F and sunny"},
             }
@@ -217,7 +218,6 @@ class TestToolConversion:
                     }
                 },
                 "required": ["location"],
-                "additionalProperties": False,
             },
         }
 
@@ -307,10 +307,15 @@ class TestResponseParsing:
         assert response.usage.cache_creation_input_tokens == 15
 
     def test_parse_error_response(self) -> None:
+        """Test that _parse_response raises when no candidates (error responses have no candidates).
+
+        Note: HTTP error checking is handled by _check_response, not _parse_response.
+        When _parse_response receives a response without candidates, it raises "blocked".
+        """
         api = GeminiAPI(api_key="test-key")
         data: dict[str, Any] = {"error": {"message": "Invalid API key"}}
 
-        with pytest.raises(RuntimeError, match="Gemini API error: Invalid API key"):
+        with pytest.raises(RuntimeError, match="Gemini response blocked"):
             api._parse_response(data)
 
     def test_parse_blocked_response(self) -> None:
@@ -434,7 +439,7 @@ class TestSend:
         response = await api.send(messages, tools=tools)
 
         call_args = api._client.post.call_args
-        # Tools use functionDeclarations
+        # Tools use functionDeclarations (additionalProperties is stripped for Gemini)
         assert call_args[1]["json"]["tools"] == [
             {
                 "functionDeclarations": [
@@ -450,7 +455,6 @@ class TestSend:
                                 }
                             },
                             "required": [],
-                            "additionalProperties": False,
                         },
                     }
                 ]
@@ -552,7 +556,7 @@ class TestSend:
 
         messages = [Message(role=Role.USER, content="Hi")]
 
-        with pytest.raises(RuntimeError, match="Gemini API error.*Invalid API key"):
+        with pytest.raises(APIError, match="Invalid API key"):
             await api.send(messages)
 
 

@@ -12,7 +12,7 @@ Usage:
 Features:
     - Rich Console for styled output
     - Rich Live for spinner while waiting for API response
-    - prompt_toolkit for input with history
+    - Active-element input with \\ + Enter for multiline
     - Escape key to cancel running operations
     - Ctrl+D to exit
     - All built-in tools (Bash, Read, Edit, Write, Glob, Grep, etc.)
@@ -20,8 +20,7 @@ Features:
 """
 
 from .app import TerminalApp, main
-from .input_handler import InputHandler
-from .input_handlers import ConfirmationHandler, SelectionHandler, TextInputHandler
+from .input_controller import InputController
 from .message_factory import (
     add_text_to_assistant,
     add_thinking_to_assistant,
@@ -42,11 +41,8 @@ __all__ = [
     # Main app
     "TerminalApp",
     "main",
-    # Input handlers
-    "InputHandler",
-    "TextInputHandler",
-    "ConfirmationHandler",
-    "SelectionHandler",
+    # Input handling
+    "InputController",
     # Message types
     "UIMessage",
     "RenderItem",

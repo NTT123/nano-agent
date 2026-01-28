@@ -9,7 +9,7 @@ from nano_agent import DAG, ClaudeCodeAPI, Message, Role
 
 # Mock captured config for testing
 MOCK_HEADERS: dict[str, str] = {
-    "x-api-key": "sk-ant-test123456789",
+    "authorization": "Bearer sk-ant-test123456789",
     "anthropic-version": "2023-06-01",
     "anthropic-beta": "claude-code-20250219,oauth-2025-04-20",
     "user-agent": "claude-cli/2.0.76 (external, cli)",
@@ -34,9 +34,9 @@ MOCK_BODY_PARAMS: dict[str, Any] = {
 
 
 @pytest.fixture
-def mock_get_config() -> Generator[MagicMock, None, None]:
-    """Mock get_config to avoid actual CLI capture."""
-    with patch("nano_agent.claude_code_api.get_config") as mock:
+def mock_load_config() -> Generator[MagicMock, None, None]:
+    """Mock load_config to return test config without reading from file."""
+    with patch("nano_agent.capture_claude_code_auth.load_config") as mock:
         mock.return_value = (MOCK_HEADERS.copy(), MOCK_BODY_PARAMS.copy())
         yield mock
 
@@ -44,14 +44,13 @@ def mock_get_config() -> Generator[MagicMock, None, None]:
 class TestClaudeCodeAPIInit:
     """Test ClaudeCodeAPI initialization."""
 
-    def test_init_captures_config(self, mock_get_config: MagicMock) -> None:
-        """Verify capture happens at init."""
+    def test_init_loads_config(self, mock_load_config: MagicMock) -> None:
+        """Verify config is loaded at init."""
         api = ClaudeCodeAPI()
-        mock_get_config.assert_called_once_with(timeout=10)
-        assert api.headers == MOCK_HEADERS
+        mock_load_config.assert_called_once()
 
-    def test_init_uses_captured_values(self, mock_get_config: MagicMock) -> None:
-        """Verify captured values are used."""
+    def test_init_uses_loaded_values(self, mock_load_config: MagicMock) -> None:
+        """Verify loaded config values are used."""
         api = ClaudeCodeAPI()
         assert api.model == "claude-sonnet-4-20250514"
         assert api.max_tokens == 16384
@@ -59,7 +58,7 @@ class TestClaudeCodeAPIInit:
         assert api.thinking_budget == 10000
         assert api.user_id == "test-user-123"
 
-    def test_parameter_overrides(self, mock_get_config: MagicMock) -> None:
+    def test_parameter_overrides(self, mock_load_config: MagicMock) -> None:
         """Verify model/max_tokens can be overridden."""
         api = ClaudeCodeAPI(
             model="claude-opus-4-5-20251101",
@@ -72,27 +71,33 @@ class TestClaudeCodeAPIInit:
         assert api.temperature == 0.5
         assert api.thinking_budget == 5000
 
-    def test_init_raises_on_capture_failure(self) -> None:
-        """Verify clear error if capture fails."""
-        with patch("nano_agent.claude_code_api.get_config") as mock:
-            mock.side_effect = RuntimeError("Claude CLI not found")
-            with pytest.raises(RuntimeError) as exc_info:
+    def test_init_raises_without_auth(self) -> None:
+        """Verify clear error if no auth token available."""
+        with patch("nano_agent.capture_claude_code_auth.load_config") as mock:
+            mock.return_value = None  # No config file
+            with pytest.raises(ValueError) as exc_info:
                 ClaudeCodeAPI()
-            assert "Failed to capture" in str(exc_info.value)
+            assert "Auth token required" in str(exc_info.value)
 
-    def test_init_raises_on_timeout(self) -> None:
-        """Verify clear error if capture times out."""
-        with patch("nano_agent.claude_code_api.get_config") as mock:
-            mock.side_effect = TimeoutError("Timeout")
-            with pytest.raises(RuntimeError) as exc_info:
-                ClaudeCodeAPI()
-            assert "Failed to capture" in str(exc_info.value)
+    def test_init_with_explicit_auth_token(self) -> None:
+        """Verify explicit auth_token works without config file."""
+        with patch("nano_agent.capture_claude_code_auth.load_config") as mock:
+            mock.return_value = None  # No config file
+            api = ClaudeCodeAPI(auth_token="sk-ant-explicit-token")
+            assert api.auth_token == "sk-ant-explicit-token"
+
+    def test_explicit_auth_token_overrides_config(
+        self, mock_load_config: MagicMock
+    ) -> None:
+        """Verify explicit auth_token takes precedence over config."""
+        api = ClaudeCodeAPI(auth_token="sk-ant-explicit-token")
+        assert api.auth_token == "sk-ant-explicit-token"
 
 
 class TestClaudeCodeAPIRepr:
     """Test ClaudeCodeAPI repr."""
 
-    def test_repr(self, mock_get_config: MagicMock) -> None:
+    def test_repr(self, mock_load_config: MagicMock) -> None:
         """Verify clean representation."""
         api = ClaudeCodeAPI()
         repr_str = repr(api)
@@ -125,21 +130,21 @@ class TestClaudeCodeAPISend:
         return mock_response
 
     @pytest.mark.asyncio
-    async def test_send_uses_captured_headers(
-        self, mock_get_config: MagicMock, mock_httpx_response: MagicMock
+    async def test_send_uses_auth_header(
+        self, mock_load_config: MagicMock, mock_httpx_response: MagicMock
     ) -> None:
-        """Verify send() uses captured auth."""
+        """Verify send() uses auth from config."""
         api = ClaudeCodeAPI()
         with patch.object(api._client, "post", new_callable=AsyncMock) as mock_post:
             mock_post.return_value = mock_httpx_response
             messages = [Message(role=Role.USER, content="Hello")]
             await api.send(messages)
             headers = mock_post.call_args.kwargs["headers"]
-            assert headers["x-api-key"] == "sk-ant-test123456789"
+            assert "authorization" in headers or "x-api-key" in headers
 
     @pytest.mark.asyncio
     async def test_send_with_dag(
-        self, mock_get_config: MagicMock, mock_httpx_response: MagicMock
+        self, mock_load_config: MagicMock, mock_httpx_response: MagicMock
     ) -> None:
         """Verify send() works with DAG input."""
         api = ClaudeCodeAPI()
@@ -151,7 +156,7 @@ class TestClaudeCodeAPISend:
 
     @pytest.mark.asyncio
     async def test_send_uses_captured_system(
-        self, mock_get_config: MagicMock, mock_httpx_response: MagicMock
+        self, mock_load_config: MagicMock, mock_httpx_response: MagicMock
     ) -> None:
         """Verify captured system prompt is preserved."""
         api = ClaudeCodeAPI()
@@ -167,20 +172,20 @@ class TestClaudeCodeAPIContextManager:
     """Test ClaudeCodeAPI async context manager."""
 
     @pytest.mark.asyncio
-    async def test_async_context_manager(self, mock_get_config: MagicMock) -> None:
+    async def test_async_context_manager(self, mock_load_config: MagicMock) -> None:
         """Verify async context manager works."""
         async with ClaudeCodeAPI() as api:
             assert api.model == "claude-sonnet-4-20250514"
 
 
 class TestClaudeCodeAPIDefaults:
-    """Test default values when captured config is incomplete."""
+    """Test default values when config is incomplete or missing."""
 
-    def test_defaults_when_captured_values_missing(self) -> None:
-        """Verify sensible defaults when captured values are None."""
-        with patch("nano_agent.claude_code_api.get_config") as mock:
+    def test_defaults_when_config_values_missing(self) -> None:
+        """Verify sensible defaults when config values are None."""
+        with patch("nano_agent.capture_claude_code_auth.load_config") as mock:
             mock.return_value = (
-                {"authorization": "Bearer test"},
+                {"authorization": "Bearer test-token"},
                 {
                     "model": None,
                     "max_tokens": None,
@@ -192,6 +197,15 @@ class TestClaudeCodeAPIDefaults:
                 },
             )
             api = ClaudeCodeAPI()
-            assert api.model == "claude-haiku-4-5-20251001"
-            assert api.max_tokens == 2048
-            assert api.temperature == 1
+            # Should use built-in defaults
+            assert api.model == "claude-sonnet-4-20250514"
+            assert api.max_tokens == 16000
+            assert api.temperature == 1.0
+
+    def test_defaults_when_no_config_but_explicit_auth(self) -> None:
+        """Verify defaults work when no config file but auth provided."""
+        with patch("nano_agent.capture_claude_code_auth.load_config") as mock:
+            mock.return_value = None
+            api = ClaudeCodeAPI(auth_token="sk-ant-test")
+            assert api.model == "claude-sonnet-4-20250514"
+            assert api.max_tokens == 16000

@@ -259,9 +259,9 @@ class TestPythonTool:
 
 class TestDefaultTools:
     def test_default_tools_count(self) -> None:
-        # 10 tools (excludes WebSearch stub, EditConfirm removed)
+        # 11 tools (excludes WebSearch stub, EditConfirm removed)
         tools = get_default_tools()
-        assert len(tools) == 10
+        assert len(tools) == 11
 
     def test_default_tools_are_tool_instances(self) -> None:
         tools = get_default_tools()
@@ -294,6 +294,7 @@ class TestDefaultTools:
             "WebFetch",
             "TodoWrite",
             "Python",
+            "AskUserQuestion",
         }
         tools = get_default_tools()
         actual_names = {tool.name for tool in tools}
