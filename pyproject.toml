@@ -23,6 +23,8 @@ dependencies = [
     "prompt_toolkit>=3.0.0",
 ]
 
+[project.optional-dependencies]
+tmux = ["libtmux>=0.37.0"]
 
 [project.urls]
 Homepage = "https://github.com/NTT123/nano_agent"

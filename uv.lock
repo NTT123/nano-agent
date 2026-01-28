@@ -230,6 +230,15 @@ wheels = [
 ]
 
 [[package]]
+name = "libtmux"
+version = "0.53.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/e7/28/e2b252817cb181aec2f42fe2d1d7fac5ec9c4d15bfb2b8ea4bd1179e4244/libtmux-0.53.0.tar.gz", hash = "sha256:1d19af4cea0c19543954d7e7317c7025c0739b029cccbe3b843212fae238f1bd", size = 405001, upload-time = "2025-12-14T11:59:11.337Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0e/d0/2e8bc5caa639ebb9f8801ba0be7070a28d48d8ed60e2a428d40f71fb88b8/libtmux-0.53.0-py3-none-any.whl", hash = "sha256:024b7ae6a12aae55358e8feb914c8632b3ab9bd61c0987c53559643c6a58ee4f", size = 77582, upload-time = "2025-12-14T11:59:09.739Z" },
+]
+
+[[package]]
 name = "markdown-it-py"
 version = "4.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -303,6 +312,11 @@ dependencies = [
     { name = "rich" },
 ]
 
+[package.optional-dependencies]
+tmux = [
+    { name = "libtmux" },
+]
+
 [package.dev-dependencies]
 dev = [
     { name = "black" },
@@ -316,10 +330,12 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "httpx", specifier = ">=0.28.0" },
+    { name = "libtmux", marker = "extra == 'tmux'", specifier = ">=0.37.0" },
     { name = "pip", specifier = ">=25.3" },
     { name = "prompt-toolkit", specifier = ">=3.0.0" },
     { name = "rich", specifier = ">=13.0.0" },
 ]
+provides-extras = ["tmux"]
 
 [package.metadata.requires-dev]
 dev = [
@@ -564,9 +580,9 @@ wheels = [
 
 [[package]]
 name = "wcwidth"
-version = "0.3.5"
+version = "0.5.0"
 source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/95/fc/44799c4a51ff0da0de0ff27e68c9dea3454f3d9bf15ffb606aeb6943e672/wcwidth-0.3.5.tar.gz", hash = "sha256:7c3463f312540cf21ddd527ea34f3ae95c057fa191aa7a9e043898d20d636e59", size = 234185, upload-time = "2026-01-25T04:37:23.942Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/64/6e/62daec357285b927e82263a81f3b4c1790215bc77c42530ce4a69d501a43/wcwidth-0.5.0.tar.gz", hash = "sha256:f89c103c949a693bf563377b2153082bf58e309919dfb7f27b04d862a0089333", size = 246585, upload-time = "2026-01-27T01:31:44.942Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/7a/86/7f461495625145a99d60f14cdac142a11db5d501c86d48aad165575d1e06/wcwidth-0.3.5-py3-none-any.whl", hash = "sha256:b0a0245130566939a24ab8432e625b38272fbc62ecbe5aecbdcb50b8f02ce993", size = 86681, upload-time = "2026-01-25T04:37:22.585Z" },
+    { url = "https://files.pythonhosted.org/packages/f2/3e/45583b67c2ff08ad5a582d316fcb2f11d6cf0a50c7707ac09d212d25bc98/wcwidth-0.5.0-py3-none-any.whl", hash = "sha256:1efe1361b83b0ff7877b81ba57c8562c99cf812158b778988ce17ec061095695", size = 93772, upload-time = "2026-01-27T01:31:43.432Z" },
 ]
