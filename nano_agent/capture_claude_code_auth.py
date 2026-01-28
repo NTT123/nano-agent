@@ -27,6 +27,7 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import stat
@@ -372,11 +373,8 @@ def get_config(
     """
     Capture all HTTP headers and request body parameters from Claude CLI.
 
-    This is the recommended way to capture full configuration from Claude CLI.
-    Starts a local MITM proxy server and intercepts Claude CLI API requests,
-    forwarding them to the real API and returning real responses.
-
-    Captures ALL valid requests and uses the LAST one (most up-to-date tokens).
+    This is a sync wrapper around async_get_config(). For async code, use
+    async_get_config() directly.
 
     Args:
         timeout: Seconds to wait for capture (default: 30)
@@ -392,7 +390,60 @@ def get_config(
         TimeoutError: If config not captured within timeout
         RuntimeError: If server or subprocess fails
     """
-    print("Capturing configuration (MITM proxy mode)...", file=sys.stderr)
+    return asyncio.run(async_get_config(timeout, save_to_file, config_path))
+
+
+async def _cleanup_process(
+    process: asyncio.subprocess.Process,
+    terminate_timeout: float = 1.0,
+    kill_timeout: float = 0.5,
+) -> None:
+    """Clean up subprocess gracefully: terminate → wait → kill if needed.
+    
+    Args:
+        process: The subprocess to clean up
+        terminate_timeout: Seconds to wait after terminate (default: 1.0)
+        kill_timeout: Seconds to wait after kill (default: 0.5)
+    """
+    if process.returncode is not None:
+        return  # Already exited
+    
+    try:
+        process.terminate()
+        await asyncio.wait_for(process.wait(), timeout=terminate_timeout)
+    except (ProcessLookupError, asyncio.TimeoutError):
+        # Process already gone or won't terminate gracefully - try kill
+        try:
+            process.kill()
+            await asyncio.wait_for(process.wait(), timeout=kill_timeout)
+        except (ProcessLookupError, asyncio.TimeoutError):
+            pass  # Process gone or won't die - give up
+
+
+async def async_get_config(
+    timeout: int = 30,
+    save_to_file: bool = True,
+    config_path: Path | str | None = None,
+) -> tuple[dict[str, str], dict[str, Any]]:
+    """
+    Async version of get_config() - captures HTTP headers and request body from Claude CLI.
+
+    This is the recommended way to capture full configuration from Claude CLI in async code.
+    Uses asyncio.create_subprocess_exec() and asyncio.sleep() for true async operation.
+
+    Args:
+        timeout: Seconds to wait for capture (default: 30)
+        save_to_file: Whether to save config to file (default: True)
+        config_path: Path to save config (default: ~/.nano-agent.json)
+
+    Returns:
+        Tuple of (headers_dict, body_params_dict)
+
+    Raises:
+        TimeoutError: If config not captured within timeout
+        RuntimeError: If server or subprocess fails
+    """
+    print("Capturing configuration (async MITM proxy mode)...", file=sys.stderr)
 
     # Reset captured data
     MITMCaptureHandler.all_captured_configs = []
@@ -405,46 +456,39 @@ def get_config(
     # Get the actual port assigned by the OS
     actual_port = server.server_address[1]
     print(f"Starting MITM proxy on port {actual_port}...", file=sys.stderr)
-    time.sleep(0.2)  # Brief wait for server to bind
+    await asyncio.sleep(0.2)  # Brief wait for server to bind
 
     # Launch Claude CLI subprocess with redirected base URL
     env = os.environ.copy()
     env["ANTHROPIC_BASE_URL"] = f"http://localhost:{actual_port}/"
-    # Disable unnecessary traffic for faster capture
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
 
     print("Launching Claude CLI...", file=sys.stderr)
     process = None
     try:
-        process = subprocess.Popen(
-            ["claude", "-p", "hey"],  # Simple prompt to trigger API call
+        process = await asyncio.create_subprocess_exec(
+            "claude", "-p", "hey",
             env=env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            stdin=subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+            stdin=asyncio.subprocess.DEVNULL,
         )
 
         # Wait for at least one config to be captured
         start_time = time.time()
         while not MITMCaptureHandler.all_captured_configs:
             if time.time() - start_time > timeout:
-                process.kill()
+                await _cleanup_process(process)
                 MITMCaptureHandler.close_http_client()
-                # Non-blocking shutdown
                 threading.Thread(target=server.shutdown, daemon=True).start()
                 raise TimeoutError(f"Failed to capture config within {timeout} seconds")
-            time.sleep(0.05)
+            await asyncio.sleep(0.05)
 
         # Wait briefly for any additional requests (token refresh, etc.)
-        time.sleep(0.5)
+        await asyncio.sleep(0.5)
 
         # Clean up process first
-        process.terminate()
-        try:
-            process.wait(timeout=1.0)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=0.5)
+        await _cleanup_process(process)
 
         # Close HTTP client
         MITMCaptureHandler.close_http_client()
@@ -452,7 +496,7 @@ def get_config(
         # Shutdown server in background (don't block on it)
         shutdown_thread = threading.Thread(target=server.shutdown, daemon=True)
         shutdown_thread.start()
-        shutdown_thread.join(timeout=1.0)  # Wait max 1 second
+        shutdown_thread.join(timeout=1.0)
 
         # Use the LAST captured config (most up-to-date tokens)
         if MITMCaptureHandler.all_captured_configs:
@@ -479,17 +523,15 @@ def get_config(
 
     except FileNotFoundError:
         MITMCaptureHandler.close_http_client()
-        # Non-blocking shutdown
         threading.Thread(target=server.shutdown, daemon=True).start()
         raise RuntimeError(
             "Claude CLI not found. Make sure 'claude' is installed and in PATH."
         )
     except Exception as e:
         MITMCaptureHandler.close_http_client()
-        # Non-blocking shutdown
         threading.Thread(target=server.shutdown, daemon=True).start()
         if process:
-            process.kill()
+            await _cleanup_process(process)
         raise RuntimeError(f"Failed to capture config: {e}")
 
 
