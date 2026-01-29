@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import tempfile
 import time
 import uuid
@@ -61,6 +62,13 @@ def _get_python_script_dir() -> Path:
     script_dir = Path(tempfile.gettempdir()) / _PYTHON_SCRIPT_PREFIX
     script_dir.mkdir(exist_ok=True)
     return script_dir
+
+
+def _get_uv_cache_dir() -> Path:
+    """Get or create a writable uv cache directory in temp."""
+    cache_dir = Path(tempfile.gettempdir()) / "nano_uv_cache"
+    cache_dir.mkdir(exist_ok=True)
+    return cache_dir
 
 
 def list_python_scripts() -> list[PythonScript]:
@@ -377,10 +385,15 @@ Note: Requires 'uv' to be installed (pip install uv or brew install uv)."""
         # Execute
         start_time = time.time()
         try:
+            env = os.environ.copy()
+            cache_dir = _get_uv_cache_dir()
+            env.setdefault("UV_CACHE_DIR", str(cache_dir))
+            env.setdefault("XDG_CACHE_HOME", str(cache_dir))
             process = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env=env,
             )
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(), timeout=timeout_s

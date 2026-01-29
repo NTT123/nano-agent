@@ -587,6 +587,8 @@ class Tool:
         missing_commands = []
         for cmd, install_hint in self._required_commands.items():
             if shutil.which(cmd) is None:
+                if cmd == "python" and shutil.which("python3") is not None:
+                    continue
                 missing_commands.append((cmd, install_hint))
 
         if missing_commands:

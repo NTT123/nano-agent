@@ -10,14 +10,12 @@ The message list is the source of truth for UI rendering:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Iterator
+from typing import Iterator
 
+from rich.console import Console, RenderableType
 from rich.text import Text
 
 from .messages import MessageStatus, RenderItem, UIMessage
-
-if TYPE_CHECKING:
-    from rich.console import Console, RenderableType
 
 
 @dataclass

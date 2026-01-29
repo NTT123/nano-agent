@@ -6,7 +6,7 @@ different message types (welcome, user, assistant, tool, error, etc.).
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from rich.text import Text
 
@@ -14,9 +14,6 @@ from .messages import MessageStatus, RenderItem, UIMessage
 from .rendering import MessageRenderer
 
 renderer = MessageRenderer()
-
-if TYPE_CHECKING:
-    from rich.console import RenderableType
 
 
 def create_welcome_message() -> UIMessage:

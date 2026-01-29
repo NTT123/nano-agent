@@ -6,19 +6,21 @@ for display in Textual's RichLog widget.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 from rich import box
-from rich.console import RenderableType
-from rich.markdown import ListItem, Markdown, MarkdownElement, TextElement
+from rich.console import Console, ConsoleOptions, RenderResult, RenderableType
+from rich.markdown import (
+    ListItem,
+    Markdown,
+    MarkdownContext,
+    MarkdownElement,
+    TableBodyElement,
+    TableHeaderElement,
+    TextElement,
+)
 from rich.segment import Segment
 from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
-
-if TYPE_CHECKING:
-    from rich.console import Console, ConsoleOptions, RenderResult
-    from rich.markdown import MarkdownContext, TableBodyElement, TableHeaderElement
 
 def _loop_first(iterable):
     """Yield (is_first, item) for each element."""

@@ -10,11 +10,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import Any, Protocol
 from uuid import uuid4
 
-if TYPE_CHECKING:
-    from rich.console import RenderableType
+from rich.console import RenderableType
 
 
 class MessageStatus(Enum):

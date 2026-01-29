@@ -9,13 +9,12 @@ This module provides:
 from __future__ import annotations
 
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, Protocol, Self
+from typing import Any, Protocol, Self
 
 import httpx
 
-if TYPE_CHECKING:
-    from .dag import DAG
-    from .data_structures import Response
+from .dag import DAG
+from .data_structures import Response
 
 __all__ = ["APIError", "APIClientMixin", "APIProtocol"]
 
