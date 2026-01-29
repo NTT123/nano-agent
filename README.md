@@ -73,6 +73,22 @@ cd nano-agent
 uv sync
 ```
 
+## Development
+
+```bash
+# Install pre-commit hooks (required for contributing)
+uv run pre-commit install
+
+# Run tests
+uv run pytest
+
+# Type checking
+uv run mypy .
+
+# Format code
+uv run pre-commit run --all-files
+```
+
 ## CLI
 
 **nano-cli** is a lightweight, terminal-based AI coding assistant similar to Claude Code or Cursor. It provides an agentic loop that can read files, execute commands, edit code, and browse the web—all from your terminal.
