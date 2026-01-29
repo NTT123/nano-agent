@@ -70,9 +70,7 @@ class InputHandler:
         if not self._running or not self._reader:
             return
         loop = asyncio.get_event_loop()
-        event = await loop.run_in_executor(
-            None, self._reader.read_nonblocking, timeout
-        )
+        event = await loop.run_in_executor(None, self._reader.read_nonblocking, timeout)
         if event and event.key == "Escape" and self.on_escape:
             self.on_escape()
 

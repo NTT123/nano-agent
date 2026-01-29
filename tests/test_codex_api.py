@@ -1,9 +1,7 @@
 """Tests for Codex API client."""
 
-from typing import Any
-
 from dataclasses import dataclass
-from typing import Annotated
+from typing import Annotated, Any
 
 import pytest
 
@@ -113,7 +111,9 @@ class TestMessageConversion:
             role=Role.ASSISTANT,
             content=[
                 TextContent(text="Calling tool"),
-                ToolUseContent(id="call_123", name="get_weather", input={"city": "NYC"}),
+                ToolUseContent(
+                    id="call_123", name="get_weather", input={"city": "NYC"}
+                ),
             ],
         )
         items = api._convert_message_to_codex(msg)

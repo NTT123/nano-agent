@@ -8,9 +8,9 @@ import pytest
 from nano_agent import (
     BashTool,
     GlobTool,
+    GrepTool,
     PythonTool,
     ReadTool,
-    GrepTool,
     TruncatedOutput,
     TruncationConfig,
     WebFetchTool,

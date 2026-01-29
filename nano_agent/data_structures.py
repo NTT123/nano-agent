@@ -13,7 +13,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Never, TypeAlias, TypedDict
 
-
 # =============================================================================
 # JSON Type Aliases
 # =============================================================================
@@ -104,7 +103,9 @@ class ToolResultContentDict(TypedDict):
 
 
 # Forward reference for MessageDict (content can be string or list of content blocks)
-ContentBlockDict = TextContentDict | ThinkingContentDict | ToolUseContentDict | ToolResultContentDict
+ContentBlockDict = (
+    TextContentDict | ThinkingContentDict | ToolUseContentDict | ToolResultContentDict
+)
 
 
 class MessageDict(TypedDict):
@@ -126,7 +127,9 @@ class ToolDefinitionDict(TypedDict):
 
     name: str
     description: str
-    input_schema: dict[str, object]  # JSON Schema (loosely typed for dynamic generation)
+    input_schema: dict[
+        str, object
+    ]  # JSON Schema (loosely typed for dynamic generation)
 
 
 class ToolDefinitionsDict(TypedDict):
@@ -201,6 +204,7 @@ def assert_never(value: Never) -> Never:
                     assert_never(unreachable)  # Type error if cases missed
     """
     raise AssertionError(f"Unexpected value: {value!r}")
+
 
 # =============================================================================
 # Enums
@@ -426,7 +430,9 @@ class ToolDefinition:
 
     name: str
     description: str
-    input_schema: Mapping[str, object]  # JSON Schema (use JSONSchema TypedDict for manual construction)
+    input_schema: Mapping[
+        str, object
+    ]  # JSON Schema (use JSONSchema TypedDict for manual construction)
 
     def __post_init__(self) -> None:
         if not self.name:

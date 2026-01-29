@@ -94,15 +94,17 @@ class MITMCaptureHandler(BaseHTTPRequestHandler):
     def _send_minimal_response(self) -> None:
         """Send minimal valid Claude API response after capturing config."""
         # Minimal response that satisfies Claude CLI
-        response_body = json.dumps({
-            "id": "msg_capture",
-            "type": "message",
-            "role": "assistant",
-            "content": [{"type": "text", "text": "ok"}],
-            "model": "claude-sonnet-4-20250514",
-            "stop_reason": "end_turn",
-            "usage": {"input_tokens": 1, "output_tokens": 1},
-        }).encode("utf-8")
+        response_body = json.dumps(
+            {
+                "id": "msg_capture",
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "text", "text": "ok"}],
+                "model": "claude-sonnet-4-20250514",
+                "stop_reason": "end_turn",
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        ).encode("utf-8")
 
         try:
             self.send_response(200)
@@ -399,7 +401,7 @@ async def _cleanup_process(
     kill_timeout: float = 0.5,
 ) -> None:
     """Clean up subprocess gracefully: terminate → wait → kill if needed.
-    
+
     Args:
         process: The subprocess to clean up
         terminate_timeout: Seconds to wait after terminate (default: 1.0)
@@ -407,7 +409,7 @@ async def _cleanup_process(
     """
     if process.returncode is not None:
         return  # Already exited
-    
+
     try:
         process.terminate()
         await asyncio.wait_for(process.wait(), timeout=terminate_timeout)
@@ -467,7 +469,9 @@ async def async_get_config(
     process = None
     try:
         process = await asyncio.create_subprocess_exec(
-            "claude", "-p", "hey",
+            "claude",
+            "-p",
+            "hey",
             env=env,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,

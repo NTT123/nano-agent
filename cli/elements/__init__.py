@@ -33,8 +33,8 @@ from .footer_input import FooterInput
 from .footer_manager import FooterElementManager
 from .manager import ElementManager
 from .menu_select import MenuSelect
-from .terminal import RawInputReader, TerminalRegion
 from .prompt_toolkit_input import PromptToolkitInput
+from .terminal import RawInputReader, TerminalRegion
 from .text_prompt import MultiLinePrompt, TextPrompt
 
 __all__ = [

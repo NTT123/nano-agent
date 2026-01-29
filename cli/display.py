@@ -7,7 +7,7 @@ for display in Textual's RichLog widget.
 from __future__ import annotations
 
 from rich import box
-from rich.console import Console, ConsoleOptions, RenderResult, RenderableType
+from rich.console import Console, ConsoleOptions, RenderableType, RenderResult
 from rich.markdown import (
     ListItem,
     Markdown,
@@ -22,6 +22,7 @@ from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 
+
 def _loop_first(iterable):
     """Yield (is_first, item) for each element."""
     iterator = iter(iterable)
@@ -32,6 +33,7 @@ def _loop_first(iterable):
     yield True, first_item
     for item in iterator:
         yield False, item
+
 
 # Large width to prevent Rich from truncating long lines in markdown elements
 WIDE_RENDER_WIDTH = 9999
@@ -376,7 +378,9 @@ def format_status_bar(
     result.append(" │ ", style="dim")
 
     # Token stats
-    result.append(f"Tokens: {total_input_tokens:,}↓ {total_output_tokens:,}↑", style="dim")
+    result.append(
+        f"Tokens: {total_input_tokens:,}↓ {total_output_tokens:,}↑", style="dim"
+    )
 
     return result
 
@@ -432,7 +436,9 @@ def format_status_bar_with_spinner(
 
     # Token stats
     tokens_text = Text()
-    tokens_text.append(f"Tokens: {total_input_tokens:,}↓ {total_output_tokens:,}↑", style="dim")
+    tokens_text.append(
+        f"Tokens: {total_input_tokens:,}↓ {total_output_tokens:,}↑", style="dim"
+    )
 
     # Add escape hint when spinner is active
     if spinner_text:

@@ -56,12 +56,9 @@ def _generate_preview(
     new_region = lines[start:match_line] + new_lines + lines[old_end:end]
 
     # Use difflib to generate unified diff
-    diff = list(difflib.unified_diff(
-        old_region,
-        new_region,
-        lineterm='',
-        n=context_lines
-    ))
+    diff = list(
+        difflib.unified_diff(old_region, new_region, lineterm="", n=context_lines)
+    )
 
     # Skip the header lines (--- and +++ and @@)
     # and format with line numbers
@@ -70,15 +67,15 @@ def _generate_preview(
     new_line_num = start + 1
 
     for line in diff:
-        if line.startswith('---') or line.startswith('+++') or line.startswith('@@'):
+        if line.startswith("---") or line.startswith("+++") or line.startswith("@@"):
             continue
-        elif line.startswith('-'):
+        elif line.startswith("-"):
             preview_parts.append(f"  -  {old_line_num:6}\t{line[1:]}")
             old_line_num += 1
-        elif line.startswith('+'):
+        elif line.startswith("+"):
             preview_parts.append(f"  +  {new_line_num:6}\t{line[1:]}")
             new_line_num += 1
-        elif line.startswith(' '):
+        elif line.startswith(" "):
             preview_parts.append(f"     {old_line_num:6}\t{line[1:]}")
             old_line_num += 1
             new_line_num += 1

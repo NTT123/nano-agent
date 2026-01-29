@@ -28,8 +28,7 @@ class SessionStore:
             loop = asyncio.get_event_loop()
             session_id = datetime.now().isoformat()
             await loop.run_in_executor(
-                None,
-                lambda: dag.save(filepath, session_id=session_id)
+                None, lambda: dag.save(filepath, session_id=session_id)
             )
         except Exception:
             # Silently ignore save errors to not interrupt the user
@@ -45,8 +44,7 @@ class SessionStore:
         loop = asyncio.get_event_loop()
         session_id = datetime.now().isoformat()
         await loop.run_in_executor(
-            None,
-            lambda: dag.save(filepath, session_id=session_id)
+            None, lambda: dag.save(filepath, session_id=session_id)
         )
         return filepath
 
@@ -59,7 +57,6 @@ class SessionStore:
             raise FileNotFoundError(f"File not found: {filepath}")
         loop = asyncio.get_event_loop()
         loaded_dag, metadata = await loop.run_in_executor(
-            None,
-            lambda: DAG.load(filepath)
+            None, lambda: DAG.load(filepath)
         )
         return loaded_dag, metadata, filepath

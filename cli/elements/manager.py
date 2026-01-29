@@ -21,14 +21,14 @@ class ElementManager:
     """Coordinates active elements with terminal I/O.
 
     Only one element can be active at a time. Supports two types of elements:
-    
+
     1. Standard elements: Manager controls terminal region and input handling
        - get_lines() for rendering
        - handle_input() for keystroke processing
-       
+
     2. Self-managed elements: Element handles its own I/O
        - run_async() for custom I/O handling
-    
+
     TTY resources (TerminalRegion, RawInputReader) are lazily initialized on
     first use to allow instantiation in non-TTY environments (e.g., tests).
     """

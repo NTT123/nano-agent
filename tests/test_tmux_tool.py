@@ -117,9 +117,7 @@ class TestTmuxToolFunctional:
             original_modules = sys.modules.copy()
             sys.modules["libtmux"] = None  # type: ignore
 
-            result = asyncio.run(
-                tool.execute({"operation": "list_sessions"})
-            )
+            result = asyncio.run(tool.execute({"operation": "list_sessions"}))
             assert isinstance(result, TextContent)
             # Restore - the actual test may or may not work depending on env
             # The key is to verify the tool handles import errors gracefully
@@ -134,12 +132,13 @@ class TestTmuxToolFunctional:
         mock_libtmux.Server.return_value = mock_server
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
-            result = asyncio.run(
-                tool.execute({"operation": "unknown_op"})
-            )
+            result = asyncio.run(tool.execute({"operation": "unknown_op"}))
             assert isinstance(result, TextContent)
             assert "Error" in result.text
-            assert "unknown_op" in result.text.lower() or "Unknown operation" in result.text
+            assert (
+                "unknown_op" in result.text.lower()
+                or "Unknown operation" in result.text
+            )
 
     def test_list_sessions_empty(self) -> None:
         """Test list_sessions when no sessions exist."""
@@ -151,9 +150,7 @@ class TestTmuxToolFunctional:
         mock_libtmux.Server.return_value = mock_server
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
-            result = asyncio.run(
-                tool.execute({"operation": "list_sessions"})
-            )
+            result = asyncio.run(tool.execute({"operation": "list_sessions"}))
             assert isinstance(result, TextContent)
             assert "No active" in result.text
 
@@ -178,9 +175,7 @@ class TestTmuxToolFunctional:
         mock_libtmux.Server.return_value = mock_server
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
-            result = asyncio.run(
-                tool.execute({"operation": "list_sessions"})
-            )
+            result = asyncio.run(tool.execute({"operation": "list_sessions"}))
             assert isinstance(result, TextContent)
             assert "dev" in result.text
             assert "prod" in result.text
@@ -196,9 +191,7 @@ class TestTmuxToolFunctional:
         mock_libtmux.Server.return_value = mock_server
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
-            result = asyncio.run(
-                tool.execute({"operation": "new_session"})
-            )
+            result = asyncio.run(tool.execute({"operation": "new_session"}))
             assert isinstance(result, TextContent)
             assert "Error" in result.text
             assert "session_name" in result.text
@@ -215,10 +208,7 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "new_session",
-                    "session_name": "existing"
-                })
+                tool.execute({"operation": "new_session", "session_name": "existing"})
             )
             assert isinstance(result, TextContent)
             assert "Error" in result.text
@@ -249,11 +239,13 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "new_session",
-                    "session_name": "dev",
-                    "window_name": "main"
-                })
+                tool.execute(
+                    {
+                        "operation": "new_session",
+                        "session_name": "dev",
+                        "window_name": "main",
+                    }
+                )
             )
             assert isinstance(result, TextContent)
             assert "Created session" in result.text
@@ -269,10 +261,7 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "send_keys",
-                    "keys": "ls -la"
-                })
+                tool.execute({"operation": "send_keys", "keys": "ls -la"})
             )
             assert isinstance(result, TextContent)
             assert "Error" in result.text
@@ -288,10 +277,7 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "send_keys",
-                    "session_name": "dev"
-                })
+                tool.execute({"operation": "send_keys", "session_name": "dev"})
             )
             assert isinstance(result, TextContent)
             assert "Error" in result.text
@@ -313,11 +299,13 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "send_keys",
-                    "session_name": "nonexistent",
-                    "keys": "ls"
-                })
+                tool.execute(
+                    {
+                        "operation": "send_keys",
+                        "session_name": "nonexistent",
+                        "keys": "ls",
+                    }
+                )
             )
             assert isinstance(result, TextContent)
             assert "Error" in result.text
@@ -342,11 +330,9 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "send_keys",
-                    "session_name": "dev",
-                    "keys": "ls -la"
-                })
+                tool.execute(
+                    {"operation": "send_keys", "session_name": "dev", "keys": "ls -la"}
+                )
             )
             assert isinstance(result, TextContent)
             assert "Sent keys" in result.text
@@ -373,10 +359,7 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "capture_pane",
-                    "session_name": "dev"
-                })
+                tool.execute({"operation": "capture_pane", "session_name": "dev"})
             )
             assert isinstance(result, TextContent)
             assert "line1" in result.text
@@ -404,10 +387,7 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "capture_pane",
-                    "session_name": "dev"
-                })
+                tool.execute({"operation": "capture_pane", "session_name": "dev"})
             )
             assert isinstance(result, TextContent)
             assert "empty" in result.text.lower()
@@ -426,10 +406,7 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "kill_session",
-                    "session_name": "dev"
-                })
+                tool.execute({"operation": "kill_session", "session_name": "dev"})
             )
             assert isinstance(result, TextContent)
             assert "Killed" in result.text
@@ -462,10 +439,7 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "list_windows",
-                    "session_name": "dev"
-                })
+                tool.execute({"operation": "list_windows", "session_name": "dev"})
             )
             assert isinstance(result, TextContent)
             assert "editor" in result.text
@@ -492,11 +466,13 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "new_window",
-                    "session_name": "dev",
-                    "window_name": "logs"
-                })
+                tool.execute(
+                    {
+                        "operation": "new_window",
+                        "session_name": "dev",
+                        "window_name": "logs",
+                    }
+                )
             )
             assert isinstance(result, TextContent)
             assert "Created window" in result.text
@@ -526,11 +502,9 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "split_pane",
-                    "session_name": "dev",
-                    "vertical": True
-                })
+                tool.execute(
+                    {"operation": "split_pane", "session_name": "dev", "vertical": True}
+                )
             )
             assert isinstance(result, TextContent)
             assert "Split pane" in result.text
@@ -560,12 +534,14 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "send_keys",
-                    "session_name": "dev",
-                    "window_index": 5,
-                    "keys": "ls"
-                })
+                tool.execute(
+                    {
+                        "operation": "send_keys",
+                        "session_name": "dev",
+                        "window_index": 5,
+                        "keys": "ls",
+                    }
+                )
             )
             assert isinstance(result, TextContent)
             assert "Error" in result.text
@@ -590,12 +566,14 @@ class TestTmuxToolFunctional:
 
         with patch.dict("sys.modules", {"libtmux": mock_libtmux}):
             result = asyncio.run(
-                tool.execute({
-                    "operation": "send_keys",
-                    "session_name": "dev",
-                    "pane_index": 5,
-                    "keys": "ls"
-                })
+                tool.execute(
+                    {
+                        "operation": "send_keys",
+                        "session_name": "dev",
+                        "pane_index": 5,
+                        "keys": "ls",
+                    }
+                )
             )
             assert isinstance(result, TextContent)
             assert "Error" in result.text
@@ -612,6 +590,7 @@ class TestTmuxToolIntegration:
     def check_tmux(self) -> None:
         """Skip test if tmux is not available."""
         import shutil
+
         if shutil.which("tmux") is None:
             pytest.skip("tmux not installed")
 
@@ -627,9 +606,7 @@ class TestTmuxToolIntegration:
     def test_list_sessions_real(self) -> None:
         """Test list_sessions with real tmux (doesn't create sessions)."""
         tool = TmuxTool()
-        result = asyncio.run(
-            tool.execute({"operation": "list_sessions"})
-        )
+        result = asyncio.run(tool.execute({"operation": "list_sessions"}))
         assert isinstance(result, TextContent)
         # Should either list sessions or say no sessions
         assert "session" in result.text.lower()

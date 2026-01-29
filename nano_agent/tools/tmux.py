@@ -29,12 +29,8 @@ class TmuxInput:
     window_index: Annotated[
         int, Desc("Window index to target (0-based, default 0)")
     ] = 0
-    pane_index: Annotated[
-        int, Desc("Pane index to target (0-based, default 0)")
-    ] = 0
-    keys: Annotated[
-        str, Desc("Keys/command to send (for send_keys operation)")
-    ] = ""
+    pane_index: Annotated[int, Desc("Pane index to target (0-based, default 0)")] = 0
+    keys: Annotated[str, Desc("Keys/command to send (for send_keys operation)")] = ""
     enter: Annotated[
         bool, Desc("Whether to press Enter after sending keys (default True)")
     ] = True
@@ -215,9 +211,7 @@ Note: Requires tmux to be installed and libtmux Python package."""
             )
         return TextContent(text="\n".join(lines))
 
-    def _new_session(
-        self, server: "libtmux.Server", input: TmuxInput
-    ) -> TextContent:
+    def _new_session(self, server: "libtmux.Server", input: TmuxInput) -> TextContent:
         """Create a new tmux session."""
         if not input.session_name:
             return TextContent(text="Error: session_name is required for new_session")
@@ -247,9 +241,7 @@ Note: Requires tmux to be installed and libtmux Python package."""
             f"  Pane: {pane.id}"
         )
 
-    def _send_keys(
-        self, server: "libtmux.Server", input: TmuxInput
-    ) -> TextContent:
+    def _send_keys(self, server: "libtmux.Server", input: TmuxInput) -> TextContent:
         """Send keys to a pane."""
         if not input.session_name:
             return TextContent(text="Error: session_name is required for send_keys")
@@ -271,9 +263,7 @@ Note: Requires tmux to be installed and libtmux Python package."""
             + (f" (with Enter)" if input.enter else " (no Enter)")
         )
 
-    def _capture_pane(
-        self, server: "libtmux.Server", input: TmuxInput
-    ) -> TextContent:
+    def _capture_pane(self, server: "libtmux.Server", input: TmuxInput) -> TextContent:
         """Capture content from a pane."""
         if not input.session_name:
             return TextContent(text="Error: session_name is required for capture_pane")
@@ -311,9 +301,7 @@ Note: Requires tmux to be installed and libtmux Python package."""
 
         return TextContent(text=text)
 
-    def _kill_session(
-        self, server: "libtmux.Server", input: TmuxInput
-    ) -> TextContent:
+    def _kill_session(self, server: "libtmux.Server", input: TmuxInput) -> TextContent:
         """Kill a tmux session."""
         if not input.session_name:
             return TextContent(text="Error: session_name is required for kill_session")
@@ -327,9 +315,7 @@ Note: Requires tmux to be installed and libtmux Python package."""
 
         return TextContent(text=f"Killed session '{session_name}'")
 
-    def _list_windows(
-        self, server: "libtmux.Server", input: TmuxInput
-    ) -> TextContent:
+    def _list_windows(self, server: "libtmux.Server", input: TmuxInput) -> TextContent:
         """List windows in a session."""
         if not input.session_name:
             return TextContent(text="Error: session_name is required for list_windows")
@@ -351,9 +337,7 @@ Note: Requires tmux to be installed and libtmux Python package."""
             )
         return TextContent(text="\n".join(lines))
 
-    def _new_window(
-        self, server: "libtmux.Server", input: TmuxInput
-    ) -> TextContent:
+    def _new_window(self, server: "libtmux.Server", input: TmuxInput) -> TextContent:
         """Create a new window in a session."""
         if not input.session_name:
             return TextContent(text="Error: session_name is required for new_window")
@@ -373,9 +357,7 @@ Note: Requires tmux to be installed and libtmux Python package."""
             f"in session '{session.name}'"
         )
 
-    def _split_pane(
-        self, server: "libtmux.Server", input: TmuxInput
-    ) -> TextContent:
+    def _split_pane(self, server: "libtmux.Server", input: TmuxInput) -> TextContent:
         """Split a pane."""
         if not input.session_name:
             return TextContent(text="Error: session_name is required for split_pane")

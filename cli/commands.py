@@ -48,7 +48,9 @@ Input:
   Esc - Cancel input or current operation (during execution)
   Ctrl+D - Exit"""
 
-    async def handle(self, command: str, ctx: CommandContext) -> tuple[bool, list[object]]:
+    async def handle(
+        self, command: str, ctx: CommandContext
+    ) -> tuple[bool, list[object]]:
         """Handle a slash command.
 
         Returns:

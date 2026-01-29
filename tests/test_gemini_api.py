@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 
 from nano_agent import (
-    APIError,
     DAG,
+    APIError,
     Message,
     Response,
     Role,

@@ -20,6 +20,11 @@ from .capture_claude_code_auth import (
     load_config,
     save_config,
 )
+
+# API clients
+from .claude_api import ClaudeAPI, Response, Usage
+from .claude_code_api import ClaudeCodeAPI
+from .codex_api import CodexAPI
 from .codex_auth import (
     DEFAULT_CODEX_AUTH_PATH,
     get_codex_access_token,
@@ -27,57 +32,46 @@ from .codex_auth import (
     load_codex_auth,
 )
 
-# API clients
-from .claude_api import ClaudeAPI, Response, Usage
-from .claude_code_api import ClaudeCodeAPI
-
 # Core graph primitives
 from .dag import DAG, Node
 
 # Data structures - Core types
-from .data_structures import (
-    # Enums
-    Role,
-    # Content blocks (sum type: ContentBlock)
+from .data_structures import (  # Enums; Content blocks (sum type: ContentBlock); Messages; Node data (sum type: NodeData); Exhaustiveness helper; JSON type aliases; Serialization TypedDicts (for type-safe dict handling)
     ContentBlock,
-    TextContent,
-    ThinkingContent,
-    ToolUseContent,
-    ToolResultContent,
-    # Messages
-    Message,
-    # Node data (sum type: NodeData)
-    NodeData,
-    SystemPrompt,
-    ToolDefinitions,
-    ToolExecution,
-    StopReason,
-    # Exhaustiveness helper
-    assert_never,
-    # JSON type aliases
-    JSONValue,
+    ContentBlockDict,
     JSONObject,
     JSONSchema,
-    # Serialization TypedDicts (for type-safe dict handling)
-    ContentBlockDict,
-    TextContentDict,
-    ThinkingContentDict,
-    ToolUseContentDict,
-    ToolResultContentDict,
+    JSONValue,
+    Message,
     MessageDict,
-    SystemPromptDict,
-    ToolDefinitionDict,
-    ToolDefinitionsDict,
-    ToolExecutionDict,
-    StopReasonDict,
-    UsageDict,
+    NodeData,
     ResponseDict,
+    Role,
+    StopReason,
+    StopReasonDict,
     SummaryItem,
+    SystemPrompt,
+    SystemPromptDict,
+    TextContent,
+    TextContentDict,
+    ThinkingContent,
+    ThinkingContentDict,
+    ToolDefinitionDict,
+    ToolDefinitions,
+    ToolDefinitionsDict,
+    ToolExecution,
+    ToolExecutionDict,
+    ToolResultContent,
+    ToolResultContentDict,
+    ToolUseContent,
+    ToolUseContentDict,
+    UsageDict,
+    assert_never,
 )
+
 # Executor
 from .executor import run
 from .gemini_api import GeminiAPI
-from .codex_api import CodexAPI
 from .openai_api import OpenAIAPI
 
 # Tools (including Todo data classes merged from tool_handlers)

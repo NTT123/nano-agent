@@ -9,6 +9,7 @@ from typing import Any
 
 import httpx
 
+from .codex_auth import get_codex_access_token
 from .dag import DAG
 from .data_structures import (
     ContentBlock,
@@ -21,7 +22,6 @@ from .data_structures import (
     ToolUseContent,
     Usage,
 )
-from .codex_auth import get_codex_access_token
 from .tools import Tool
 
 __all__ = ["CodexAPI"]

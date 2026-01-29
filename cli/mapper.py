@@ -63,7 +63,9 @@ class DAGMessageMapper:
                     if isinstance(content_block, TextContent):
                         result_parts.append(content_block.text)
                 result_text = "\n".join(result_parts)
-            is_error = tool_result.is_error if hasattr(tool_result, "is_error") else False
+            is_error = (
+                tool_result.is_error if hasattr(tool_result, "is_error") else False
+            )
             message_list.add(create_tool_result_message(result_text, is_error=is_error))
 
     def _handle_assistant(self, message: Message, message_list: MessageList) -> None:
@@ -100,4 +102,6 @@ class DAGMessageMapper:
             message_list.add(msg)
 
         for tool_use in tool_uses:
-            message_list.add(create_tool_call_message(tool_use.name, tool_use.input or {}))
+            message_list.add(
+                create_tool_call_message(tool_use.name, tool_use.input or {})
+            )

@@ -23,7 +23,7 @@ class ConfirmPrompt(ActiveElement[bool | None]):
     """Yes/No confirmation prompt.
 
     Returns True (y), False (n), or None (Escape/cancel).
-    
+
     Optionally displays preview lines above the prompt (useful for
     showing diffs, file contents, etc.).
     """
@@ -43,9 +43,13 @@ class ConfirmPrompt(ActiveElement[bool | None]):
                 display_line = line[:48] if len(line) > 48 else line
                 lines.append(DIM + "│ " + RESET + display_line)
             if len(self.preview_lines) > self.max_preview_lines:
-                lines.append(DIM + f"│ ... ({len(self.preview_lines) - self.max_preview_lines} more lines)" + RESET)
+                lines.append(
+                    DIM
+                    + f"│ ... ({len(self.preview_lines) - self.max_preview_lines} more lines)"
+                    + RESET
+                )
             lines.append(DIM + "└" + "─" * 50 + RESET)
-        
+
         # Highlighted prompt: message in yellow, options in dim
         prompt_line = f"{YELLOW}{BOLD}{self.message}{RESET} {DIM}[y/n/esc]:{RESET} {GREEN}{self._response}{RESET}"
         lines.append(prompt_line)

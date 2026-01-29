@@ -265,9 +265,9 @@ class Question:
     allowCustom: Annotated[
         bool, Desc("Set to true to allow a freeform custom response")
     ] = False
-    customLabel: Annotated[
-        str, Desc("Label for the custom response option")
-    ] = "Other..."
+    customLabel: Annotated[str, Desc("Label for the custom response option")] = (
+        "Other..."
+    )
     customPrompt: Annotated[
         str, Desc("Prompt text for collecting a custom response")
     ] = "Your answer: "

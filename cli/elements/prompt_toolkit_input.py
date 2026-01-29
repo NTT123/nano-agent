@@ -9,10 +9,10 @@ This element uses prompt_toolkit's PromptSession for:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import math
 import os
 import shutil
-import math
+from dataclasses import dataclass, field
 from typing import Any, Callable
 
 from .base import ActiveElement, InputEvent
@@ -91,6 +91,7 @@ class PromptToolkitInput(ActiveElement[str | None]):
 
         shift_enter = getattr(Keys, "ShiftEnter", None)
         if shift_enter:
+
             @bindings.add(shift_enter)
             def handle_shift_enter(event: Any) -> None:
                 """Shift+Enter inserts a newline."""
@@ -98,6 +99,7 @@ class PromptToolkitInput(ActiveElement[str | None]):
 
         # Shift+Tab to toggle auto-accept mode
         if self.on_toggle_auto_accept:
+
             @bindings.add(Keys.BackTab)
             def handle_shift_tab(event: Any) -> None:
                 """Shift+Tab toggles auto-accept mode."""
@@ -144,7 +146,9 @@ class PromptToolkitInput(ActiveElement[str | None]):
                 try:
                     if self.get_bottom_toolbar:
                         text = self.get_bottom_toolbar()
-                        return HTML(f"<style bg='#333333' fg='#aaaaaa'> {text} </style>")
+                        return HTML(
+                            f"<style bg='#333333' fg='#aaaaaa'> {text} </style>"
+                        )
                     return None
                 except Exception:
                     return None

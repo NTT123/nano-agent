@@ -9,7 +9,6 @@ from typing import Annotated, ClassVar
 from ..data_structures import TextContent
 from .base import Desc, Tool
 
-
 # =============================================================================
 # Todo Data Classes
 # =============================================================================

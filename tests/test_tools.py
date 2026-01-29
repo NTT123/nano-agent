@@ -4,10 +4,10 @@ from nano_agent.tools import (
     BashTool,
     EditTool,
     GlobTool,
+    GrepTool,
     InputSchemaDict,
     PythonTool,
     ReadTool,
-    GrepTool,
     StatTool,
     TodoWriteTool,
     Tool,
@@ -601,7 +601,9 @@ class TestEditToolFunctional:
     def test_edit_rejected_by_callback(self) -> None:
         """Edit tool respects permission_callback rejection."""
 
-        async def reject_callback(file_path: str, preview: str, match_count: int) -> bool:
+        async def reject_callback(
+            file_path: str, preview: str, match_count: int
+        ) -> bool:
             return False
 
         with tempfile.NamedTemporaryFile(mode="w", suffix=".txt", delete=False) as f:
@@ -768,7 +770,9 @@ class TestWebFetchToolFunctional:
         if shutil.which("lynx") is None:
             import pytest
 
-            pytest.skip("lynx not installed - covered by test_webfetch_dependency_check")
+            pytest.skip(
+                "lynx not installed - covered by test_webfetch_dependency_check"
+            )
             return
 
         tool = WebFetchTool()

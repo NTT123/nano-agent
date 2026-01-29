@@ -248,9 +248,9 @@ class TestTerminalAppContinue:
         app.console = MagicMock()
         app.api = None
         app.dag = DAG().system("test")
-        
+
         await app.continue_agent()
-        
+
         # Should print error message
         app.console.print.assert_called()
 
@@ -261,9 +261,9 @@ class TestTerminalAppContinue:
         app.console = MagicMock()
         app.api = MagicMock()
         app.dag = None
-        
+
         await app.continue_agent()
-        
+
         # Should print error message
         app.console.print.assert_called()
 

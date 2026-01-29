@@ -154,7 +154,7 @@ async def main() -> None:
             print("\n[Reasoning]")
             print(reasoning)
             print()
-        
+
         function_call = _extract_function_call(response)
         if not function_call:
             print("No tool call found.")

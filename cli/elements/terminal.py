@@ -300,8 +300,8 @@ class RawInputReader:
             if not b:
                 break
             buf.extend(b)
-            if len(buf) >= len(terminator) and buf[-len(terminator):] == terminator:
-                content = buf[:-len(terminator)]
+            if len(buf) >= len(terminator) and buf[-len(terminator) :] == terminator:
+                content = buf[: -len(terminator)]
                 return content.decode("utf-8", errors="ignore")
         return buf.decode("utf-8", errors="ignore")
 
