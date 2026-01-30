@@ -27,6 +27,7 @@ Usage:
 """
 
 from .base import ActiveElement, InputEvent
+from .cancellation_menu import CancellationMenu
 from .confirm_prompt import ConfirmPrompt
 from .footer import StatusBarState, TerminalFooter
 from .footer_input import FooterInput
@@ -57,4 +58,5 @@ __all__ = [
     "PromptToolkitInput",
     "ConfirmPrompt",
     "MenuSelect",
+    "CancellationMenu",
 ]

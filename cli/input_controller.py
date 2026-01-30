@@ -8,7 +8,10 @@ import sys
 from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
+from nano_agent.cancellation import CancellationChoice, ToolExecutionBatch
+
 from .elements import (
+    CancellationMenu,
     ConfirmPrompt,
     ElementManager,
     FooterElementManager,
@@ -235,3 +238,18 @@ class InputController:
         return await self.fallback_elements.run(
             MenuSelect(title=title, options=options, multi_select=multi_select)
         )
+
+    async def show_cancellation_menu(
+        self, batch: ToolExecutionBatch
+    ) -> CancellationChoice | None:
+        """Show cancellation menu with tool execution state.
+
+        Args:
+            batch: The tool execution batch with current state
+
+        Returns:
+            User's choice for how to proceed, or None if cancelled
+        """
+        if self.elements:
+            return await self.elements.run(CancellationMenu(batch=batch))
+        return await self.fallback_elements.run(CancellationMenu(batch=batch))

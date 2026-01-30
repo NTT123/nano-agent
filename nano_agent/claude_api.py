@@ -19,6 +19,7 @@ from .data_structures import (
     ToolResultContent,
     ToolUseContent,
     Usage,
+    convert_message_to_claude_format,
 )
 from .tools import Tool
 
@@ -160,12 +161,16 @@ class ClaudeAPI:
             "anthropic-version": "2023-06-01",
         }
 
-        # Build request body
+        # Build request body - convert messages to Claude format
+        # (handles sessions created with OpenAI/Codex APIs)
+        messages_dicts = [
+            convert_message_to_claude_format(msg.to_dict()) for msg in messages
+        ]
         body: dict[str, Any] = {
             "model": self.model,
             "max_tokens": self.max_tokens,
             "temperature": self.temperature,
-            "messages": [msg.to_dict() for msg in messages],
+            "messages": messages_dicts,
             "thinking": {"type": "enabled", "budget_tokens": self.thinking_budget},
         }
 

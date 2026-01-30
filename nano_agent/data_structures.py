@@ -848,3 +848,53 @@ class Response:
             ),
             usage=usage,
         )
+
+
+# =============================================================================
+# API Format Conversion
+# =============================================================================
+
+
+def convert_message_to_claude_format(msg_dict: MessageDict) -> MessageDict:
+    """Convert a message dict to Claude API format.
+
+    Handles conversion of OpenAI 'reasoning' blocks to Claude 'thinking' blocks.
+    This allows sessions created with OpenAI/Codex APIs to be used with Claude.
+
+    Preserves all other content blocks unchanged, including 'thinking' blocks
+    with their signatures (required for multi-turn Claude conversations).
+    """
+    content = msg_dict.get("content")
+    if not isinstance(content, list):
+        return MessageDict(role=msg_dict["role"], content=msg_dict.get("content", ""))
+
+    converted_content: list[ContentBlockDict] = []
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+
+        block_type = block.get("type")
+        if block_type == "reasoning":
+            # Convert OpenAI reasoning to Claude thinking format
+            # Extract text from summary items if available
+            summary = block.get("summary", [])
+            thinking_text = ""
+            if isinstance(summary, list):
+                texts = [
+                    str(item.get("text", ""))
+                    for item in summary
+                    if isinstance(item, dict) and item.get("text")
+                ]
+                thinking_text = "\n".join(texts)
+
+            # Create Claude thinking block
+            thinking_block: ThinkingContentDict = {
+                "type": "thinking",
+                "thinking": thinking_text or "[reasoning content not available]",
+                "signature": "",
+            }
+            converted_content.append(thinking_block)
+        else:
+            converted_content.append(block)
+
+    return MessageDict(role=msg_dict["role"], content=converted_content)

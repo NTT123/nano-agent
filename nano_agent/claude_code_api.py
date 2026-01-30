@@ -14,10 +14,10 @@ import httpx
 
 from .api_base import APIClientMixin
 from .dag import DAG
-from .data_structures import Message, Response
+from .data_structures import Message, Response, convert_message_to_claude_format
 from .tools import Tool, ToolDict
 
-__all__ = ["ClaudeCodeAPI"]
+__all__ = ["ClaudeCodeAPI", "convert_message_to_claude_format"]
 
 # Default headers matching Claude Code CLI format
 DEFAULT_HEADERS = {
@@ -234,10 +234,14 @@ class ClaudeCodeAPI(APIClientMixin):
             else:
                 system_messages = list(DEFAULT_SYSTEM)
 
-        # Build request body
+        # Build request body - convert messages to Claude format
+        # (handles sessions created with OpenAI/Codex APIs)
+        messages_dicts = [
+            convert_message_to_claude_format(msg.to_dict()) for msg in messages
+        ]
         request_body: dict[str, Any] = {
             "model": self.model,
-            "messages": [msg.to_dict() for msg in messages],
+            "messages": messages_dicts,
             "system": system_messages,
             "metadata": {"user_id": self.user_id},
             "max_tokens": self.max_tokens,

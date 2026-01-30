@@ -10,7 +10,13 @@ as nodes in a directed acyclic graph (DAG).
 from .api_base import APIClientMixin, APIError, APIProtocol
 
 # Cancellation support
-from .cancellation import CancellationToken
+from .cancellation import (
+    CancellationChoice,
+    CancellationToken,
+    ToolExecutionBatch,
+    ToolExecutionStatus,
+    TrackedToolCall,
+)
 
 # Auth capture utilities
 from .capture_claude_code_auth import (
@@ -71,6 +77,7 @@ from .data_structures import (  # Enums; Content blocks (sum type: ContentBlock)
 
 # Executor
 from .executor import run
+from .fireworks_api import FireworksAPI
 from .gemini_api import GeminiAPI
 from .openai_api import OpenAIAPI
 
@@ -128,6 +135,7 @@ __all__ = [
     "DAG",
     "ClaudeAPI",
     "ClaudeCodeAPI",
+    "FireworksAPI",
     "GeminiAPI",
     "CodexAPI",
     "OpenAIAPI",

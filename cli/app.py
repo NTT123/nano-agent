@@ -37,6 +37,7 @@ from nano_agent import (
     DAG,
     ClaudeCodeAPI,
     CodexAPI,
+    FireworksAPI,
     GeminiAPI,
     Response,
     TextContent,
@@ -44,7 +45,13 @@ from nano_agent import (
     ToolUseContent,
 )
 from nano_agent.api_base import APIError
-from nano_agent.cancellation import CancellationToken
+from nano_agent.cancellation import (
+    CancellationChoice,
+    CancellationToken,
+    ToolExecutionBatch,
+    ToolExecutionStatus,
+    TrackedToolCall,
+)
 from nano_agent.capture_claude_code_auth import async_get_config
 from nano_agent.tools import (
     AskUserQuestionTool,
@@ -143,11 +150,13 @@ class TerminalApp:
             theme=Theme({"markdown.code": "cyan"}),
         )
     )
-    api: ClaudeCodeAPI | GeminiAPI | CodexAPI | None = None
+    api: ClaudeCodeAPI | GeminiAPI | CodexAPI | FireworksAPI | None = None
     use_gemini: bool = False
     use_codex: bool = False
+    use_fireworks: bool = False
     codex_model: str = "gpt-5.2-codex"
     gemini_model: str = "gemini-3-pro-preview"
+    fireworks_model: str = "accounts/fireworks/models/kimi-k2p5"
     thinking_level: str = "low"
     thinking_budget: int | None = 16000
     debug: bool = False
@@ -279,7 +288,7 @@ class TerminalApp:
         self.add_message(create_system_message("History rendered."))
 
     async def initialize_api(self) -> bool:
-        """Initialize the API client (ClaudeCodeAPI or GeminiAPI).
+        """Initialize the API client (ClaudeCodeAPI, GeminiAPI, CodexAPI, or FireworksAPI).
 
         Returns:
             True if initialization successful, False otherwise.
@@ -288,6 +297,8 @@ class TerminalApp:
             return await self._initialize_codex_api()
         if self.use_gemini:
             return await self._initialize_gemini_api()
+        if self.use_fireworks:
+            return await self._initialize_fireworks_api()
         else:
             return await self._initialize_claude_api()
 
@@ -376,6 +387,34 @@ class TerminalApp:
             self.add_message(
                 create_system_message(
                     "Log in with Codex and ensure auth is stored in file mode."
+                )
+            )
+            return False
+
+    async def _initialize_fireworks_api(self) -> bool:
+        """Initialize Fireworks API client."""
+        self.add_message(create_system_message("Connecting to Fireworks API..."))
+
+        try:
+            self.api = FireworksAPI(
+                model=self.fireworks_model,
+                debug=self.debug,
+                max_retries=3,
+                session_id="nano-cli-session",
+            )
+            model = self.api.model
+            claude_md_loaded = await self._build_dag_for_model(model)
+            self.add_message(create_system_message(f"Connected using {model}"))
+            if claude_md_loaded:
+                self.add_message(
+                    create_system_message("Loaded CLAUDE.md into system prompt")
+                )
+            return True
+        except ValueError as e:
+            self.add_message(create_error_message(str(e)))
+            self.add_message(
+                create_system_message(
+                    "Set FIREWORKS_API_KEY environment variable to use Fireworks."
                 )
             )
             return False
@@ -763,6 +802,125 @@ class TerminalApp:
             except asyncio.CancelledError:
                 pass
 
+    async def _execute_tools_with_tracking(
+        self, tool_calls: list[ToolUseContent], checkpoint: DAG
+    ) -> bool:
+        """Execute tool calls with tracking and cancellation handling.
+
+        Args:
+            tool_calls: List of tool calls to execute
+            checkpoint: DAG state before assistant response (for rollback)
+
+        Returns:
+            True if execution completed (with or without user intervention),
+            False if user chose to undo all (rollback occurred).
+        """
+        if not self.dag:
+            return True
+
+        # Create batch tracker
+        batch = ToolExecutionBatch(
+            tool_calls=[
+                TrackedToolCall(
+                    id=tc.id,
+                    name=tc.name,
+                    input=tc.input or {},
+                )
+                for tc in tool_calls
+            ]
+        )
+
+        i = 0
+        while i < len(tool_calls):
+            tool_call = tool_calls[i]
+            batch.mark_running(i)
+
+            # Show activity in footer
+            self.input_controller.set_activity(f"Running {tool_call.name}...")
+            escape_task = asyncio.create_task(self._check_for_escape())
+
+            try:
+                await self._execute_tool(tool_call)
+                batch.mark_completed(i, "success")
+                i += 1
+
+            except asyncio.CancelledError:
+                batch.mark_cancelled(i)
+
+                # Stop escape polling
+                self.input_controller.set_activity(None)
+                escape_task.cancel()
+                try:
+                    await escape_task
+                except asyncio.CancelledError:
+                    pass
+
+                # Reset cancel token for menu interaction
+                self.cancel_token.reset()
+
+                # Show cancellation menu and get user choice
+                choice = await self.input_controller.show_cancellation_menu(batch)
+
+                if choice == CancellationChoice.RETRY:
+                    # Re-execute the same tool (don't increment i)
+                    batch.tool_calls[i].status = ToolExecutionStatus.PENDING
+                    continue
+
+                elif choice == CancellationChoice.SKIP:
+                    # Tool result was already added by _execute_tool's except handler
+                    # Mark as skipped and continue to next
+                    batch.tool_calls[i].status = ToolExecutionStatus.SKIPPED
+                    i += 1
+                    continue
+
+                elif choice == CancellationChoice.KEEP_COMPLETED:
+                    # Add skipped results for remaining pending tools
+                    for j in range(i + 1, len(tool_calls)):
+                        pending_call = tool_calls[j]
+                        batch.mark_skipped(j)
+                        skipped_result = TextContent(text="Tool skipped by user.")
+                        self.add_message(
+                            create_tool_call_message(
+                                pending_call.name, pending_call.input or {}
+                            )
+                        )
+                        self.add_message(
+                            create_tool_result_message(
+                                skipped_result.text, is_error=True
+                            )
+                        )
+                        self.dag = self.dag.tool_result(
+                            ToolResultContent(
+                                tool_use_id=pending_call.id,
+                                content=[skipped_result],
+                                is_error=True,
+                            )
+                        )
+                    return True
+
+                elif choice == CancellationChoice.UNDO_ALL or choice is None:
+                    # Rollback to checkpoint
+                    self.dag = checkpoint
+                    # Remove messages added after checkpoint
+                    # (UI messages are harder to rollback, so just add a note)
+                    self.add_message(
+                        create_system_message(
+                            "Rolled back to before assistant response."
+                        )
+                    )
+                    return False
+
+            finally:
+                self.input_controller.set_activity(None)
+                if not escape_task.done():
+                    escape_task.cancel()
+                    try:
+                        await escape_task
+                    except asyncio.CancelledError:
+                        pass
+
+        return True
+
     def _render_response(self, response: Response) -> UIMessage:
         """Render assistant response (thinking, text, token count).
 
@@ -842,6 +1000,9 @@ class TerminalApp:
 
         Uses footer status bar for spinner during API calls and tool execution.
         Output is printed directly and appears above the prompt.
+
+        Implements checkpoint-based rollback: saves DAG state before each API call
+        so user can choose to undo if they cancel during tool execution.
         """
         if not self.api or not self.dag:
             return
@@ -850,6 +1011,9 @@ class TerminalApp:
         self._sync_status_to_footer()
 
         while True:
+            # CHECKPOINT: Save DAG state before API call for potential rollback
+            checkpoint = self.dag
+
             # Show activity in footer
             self.input_controller.set_activity("Thinking...")
             escape_task = asyncio.create_task(self._check_for_escape())
@@ -872,9 +1036,12 @@ class TerminalApp:
             if not tool_calls:
                 break
 
-            # Execute tools with footer status
-            for tool_call in tool_calls:
-                await self._execute_tool_with_status(tool_call)
+            # Execute tools with tracking (handles cancellation and user choices)
+            completed = await self._execute_tools_with_tracking(tool_calls, checkpoint)
+
+            # If user chose to undo all, exit loop - they need to provide new input
+            if not completed:
+                break
 
     async def _agent_loop(self) -> None:
         """Run agent loop with cancellation support.
@@ -884,6 +1051,9 @@ class TerminalApp:
 
         Uses InputController to detect Escape key for cancellation.
         Shows unified footer status bar with spinner, auto-accept status, and token counts.
+
+        Implements checkpoint-based rollback: saves DAG state before each API call
+        so user can choose to undo if they cancel during tool execution.
         """
         if not self.api or not self.dag:
             return
@@ -894,6 +1064,9 @@ class TerminalApp:
             self._sync_status_to_footer()
 
             while True:
+                # CHECKPOINT: Save DAG state before API call for potential rollback
+                checkpoint = self.dag
+
                 # API call with footer status bar, polling for Escape in background
                 self.input_controller.set_activity("Thinking...")
                 escape_task = asyncio.create_task(self._check_for_escape())
@@ -916,9 +1089,16 @@ class TerminalApp:
                 if not tool_calls:
                     break
 
-                # Execute tools with status bar showing tool name
-                for tool_call in tool_calls:
-                    await self._execute_tool_with_status(tool_call)
+                # Execute tools with tracking (handles cancellation and user choices)
+                completed = await self._execute_tools_with_tracking(
+                    tool_calls, checkpoint
+                )
+
+                # If user chose to undo all, the loop will continue with rolled-back DAG
+                # The next iteration will make a new API call with the clean state
+                if not completed:
+                    # User rolled back - exit loop, they need to provide new input
+                    break
 
     async def _run_agent_with_error_handling(self) -> None:
         """Run agent loop with error handling, auto-save, and visual formatting."""
@@ -1127,6 +1307,13 @@ def main() -> None:
         help="Use Gemini API instead of Claude (default model: gemini-3-pro-preview)",
     )
     parser.add_argument(
+        "--fireworks",
+        metavar="MODEL",
+        nargs="?",
+        const="accounts/fireworks/models/kimi-k2p5",
+        help="Use Fireworks API (default model: accounts/fireworks/models/kimi-k2p5)",
+    )
+    parser.add_argument(
         "--thinking-level",
         choices=["off", "low", "medium", "high"],
         default="low",
@@ -1155,12 +1342,15 @@ def main() -> None:
 
     use_codex = args.codex is not None
     use_gemini = args.gemini is not None and not use_codex
+    use_fireworks = args.fireworks is not None and not use_codex and not use_gemini
 
     app = TerminalApp(
         use_codex=use_codex,
         codex_model=args.codex or "gpt-5.2-codex",
         use_gemini=use_gemini,
         gemini_model=args.gemini or "gemini-3-pro-preview",
+        use_fireworks=use_fireworks,
+        fireworks_model=args.fireworks or "accounts/fireworks/models/kimi-k2p5",
         thinking_level=args.thinking_level,
         thinking_budget=args.thinking_budget,
         debug=args.debug,
