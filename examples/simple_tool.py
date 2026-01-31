@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from nano_agent import (
     DAG,
@@ -12,6 +13,9 @@ from nano_agent import (
     Tool,
     ToolResultContent,
 )
+
+if TYPE_CHECKING:
+    from nano_agent import ExecutionContext
 
 
 @dataclass
@@ -24,7 +28,11 @@ class Calculator(Tool):
     name: str = "calculator"
     description: str = "Evaluate a math expression"
 
-    async def __call__(self, input: CalculatorInput) -> TextContent:
+    async def __call__(
+        self,
+        input: CalculatorInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> TextContent:
         return TextContent(text=str(eval(input.expr)))  # noqa: S307
 
 
@@ -37,9 +45,12 @@ async def main() -> None:
     dag = dag.assistant(response.content)
 
     for call in response.get_tool_use():
-        result = await calc.execute(call.input)
-        content = result if isinstance(result, list) else [result]
-        dag = dag.tool_result(ToolResultContent(tool_use_id=call.id, content=content))
+        tool_result = await calc.execute(call.input)
+        content = tool_result.content
+        content_list = content if isinstance(content, list) else [content]
+        dag = dag.tool_result(
+            ToolResultContent(tool_use_id=call.id, content=content_list)
+        )
 
     # Get final answer
     response = await api.send(dag)

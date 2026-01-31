@@ -5,10 +5,13 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
-from typing import Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
 from ..data_structures import TextContent
 from .base import Desc, Tool
+
+if TYPE_CHECKING:
+    from ..execution_context import ExecutionContext
 
 
 @dataclass
@@ -52,7 +55,11 @@ Note: Requires 'fd' to be installed (brew install fd)."""
         )
     }
 
-    async def __call__(self, input: GlobInput) -> TextContent:
+    async def __call__(
+        self,
+        input: GlobInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> TextContent:
         """Execute glob pattern matching using fd."""
         path = input.path or "."
         pattern = input.pattern

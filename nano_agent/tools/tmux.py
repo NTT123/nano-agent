@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Annotated, Any, ClassVar, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, TypeAlias
 
 from ..data_structures import TextContent
 from .base import Desc, Tool, TruncationConfig
+
+if TYPE_CHECKING:
+    from ..execution_context import ExecutionContext
 
 TmuxServer: TypeAlias = Any
 TmuxSession: TypeAlias = Any
@@ -161,7 +164,11 @@ Note: Requires tmux to be installed and libtmux Python package."""
         "tmux": "Install with: brew install tmux (macOS) or apt install tmux (Linux)"
     }
 
-    async def __call__(self, input: TmuxInput) -> TextContent:
+    async def __call__(
+        self,
+        input: TmuxInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> TextContent:
         """Execute a tmux operation."""
         try:
             import importlib

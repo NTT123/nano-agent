@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
 from ..data_structures import TextContent
 from .base import Desc, Tool, TruncationConfig
+
+if TYPE_CHECKING:
+    from ..execution_context import ExecutionContext
 
 
 @dataclass
@@ -49,7 +52,11 @@ Note: Requires 'lynx' to be installed (brew install lynx)."""
         )
     }
 
-    async def __call__(self, input: WebFetchInput) -> TextContent:
+    async def __call__(
+        self,
+        input: WebFetchInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> TextContent:
         """Fetch URL content using lynx and return as text."""
         url = input.url
 

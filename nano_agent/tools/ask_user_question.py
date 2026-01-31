@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from ..data_structures import TextContent
 from .base import Desc, Question, Tool
+
+if TYPE_CHECKING:
+    from ..execution_context import ExecutionContext
 
 
 @dataclass
@@ -41,7 +44,11 @@ Returns:
 - If custom response is chosen, returns the user's custom text
 """
 
-    async def __call__(self, input: AskUserQuestionInput) -> TextContent:
+    async def __call__(
+        self,
+        input: AskUserQuestionInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> TextContent:
         # CLI handles interactive prompting; this is a fallback for non-interactive use.
         question_count = len(input.questions)
         return TextContent(

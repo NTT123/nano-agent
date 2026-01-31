@@ -9,10 +9,13 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
 from ..data_structures import TextContent
 from .base import Desc, Tool, TruncationConfig
+
+if TYPE_CHECKING:
+    from ..execution_context import ExecutionContext
 
 # =============================================================================
 # Module-level state for Python tool
@@ -498,7 +501,11 @@ Note: Requires 'uv' to be installed (pip install uv or brew install uv)."""
             f"  path: {script.file_path}"
         )
 
-    async def __call__(self, input: PythonInput) -> TextContent:
+    async def __call__(
+        self,
+        input: PythonInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> TextContent:
         """Execute the requested Python operation."""
         operation = input.operation.lower().strip()
 

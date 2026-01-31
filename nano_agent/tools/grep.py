@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
 from ..data_structures import TextContent
 from .base import Desc, Tool
+
+if TYPE_CHECKING:
+    from ..execution_context import ExecutionContext
 
 
 @dataclass
@@ -94,7 +97,11 @@ Examples:
         )
     }
 
-    async def __call__(self, input: GrepInput) -> TextContent:
+    async def __call__(
+        self,
+        input: GrepInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> TextContent:
         """Execute grep search using ripgrep."""
         # Build ripgrep command
         cmd = ["rg"]

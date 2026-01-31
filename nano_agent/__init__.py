@@ -109,7 +109,6 @@ from .tools import (
     ReadTool,
     StatInput,
     StatTool,
-    SubAgentCapable,
     SubAgentTool,
     Todo,
     TodoItemInput,
@@ -117,6 +116,7 @@ from .tools import (
     TodoWriteInput,
     TodoWriteTool,
     Tool,
+    ToolResult,
     TruncatedOutput,
     TruncationConfig,
     WebFetchInput,
@@ -177,10 +177,10 @@ __all__ = [
     # Execution context and sub-agent support
     "ExecutionContext",
     "run_sub_agent",
-    "SubAgentCapable",
     # Tools
     "Tool",
     "SubAgentTool",
+    "ToolResult",
     "schema_from_dataclass",
     "get_call_input_type",
     "convert_input",

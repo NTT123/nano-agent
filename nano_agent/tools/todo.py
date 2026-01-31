@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
 from ..data_structures import TextContent
 from .base import Desc, Tool
+
+if TYPE_CHECKING:
+    from ..execution_context import ExecutionContext
 
 # =============================================================================
 # Todo Data Classes
@@ -170,7 +173,11 @@ Task Management:
     # Tool Execution
     # ==========================================================================
 
-    async def __call__(self, input: TodoWriteInput) -> TextContent:
+    async def __call__(
+        self,
+        input: TodoWriteInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> TextContent:
         """Update the todo list, display it, and return a summary for the model."""
         # Convert TodoItemInput instances to Todo objects
         self._todos = [

@@ -791,8 +791,9 @@ class TerminalApp:
             return
 
         try:
-            result = await self.cancel_token.run(tool.execute(tool_call.input))
-            result_list = result if isinstance(result, list) else [result]
+            tool_result = await self.cancel_token.run(tool.execute(tool_call.input))
+            content = tool_result.content
+            result_list = content if isinstance(content, list) else [content]
             result_text = "\n".join(r.text for r in result_list)
             self.add_message(create_tool_result_message(result_text))
             self.dag = self.dag.tool_result(

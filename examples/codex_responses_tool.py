@@ -171,11 +171,12 @@ async def main() -> None:
             args = {}
 
         # Execute tool locally
-        result = await tool.execute(args)
-        if isinstance(result, list):
-            tool_output = "".join(tc.text for tc in result)
+        tool_result = await tool.execute(args)
+        content = tool_result.content
+        if isinstance(content, list):
+            tool_output = "".join(tc.text for tc in content)
         else:
-            tool_output = result.text
+            tool_output = content.text
 
         # Build follow-up context: prior context + model output items + tool output
         followup_context = list(context)

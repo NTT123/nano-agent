@@ -137,17 +137,19 @@ dag = await run(api, dag)  # Handles tool calls automatically
 
 # Manual tool handling
 for call in response.get_tool_use():
-    result = await tool.execute(call.input)
-    dag = dag.tool_result(ToolResultContent(tool_use_id=call.id, content=[result]))
+    tool_result = await tool.execute(call.input)
+    content = tool_result.content
+    content_list = content if isinstance(content, list) else [content]
+    dag = dag.tool_result(ToolResultContent(tool_use_id=call.id, content=content_list))
 ```
 
 ## Sub-Agents
 
-Tools can spawn sub-agents using the `SubAgentTool` base class:
+Tools can spawn sub-agents using the `SubAgentTool` base class (pure functional):
 
 ```python
-from nano_agent import SubAgentTool, TextContent, ReadTool
-from nano_agent.tools.base import Desc
+from nano_agent import SubAgentTool, ExecutionContext, TextContent, ReadTool
+from nano_agent.tools.base import Desc, ToolResult
 
 @dataclass
 class SecurityAuditInput:
@@ -158,19 +160,30 @@ class SecurityAuditTool(SubAgentTool):
     name: str = "SecurityAudit"
     description: str = "Spawn a sub-agent to audit code for security issues"
 
-    async def __call__(self, input: SecurityAuditInput) -> TextContent:
-        summary = await self.spawn(
+    async def __call__(
+        self,
+        input: SecurityAuditInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> ToolResult:
+        if not execution_context:
+            return ToolResult(content=TextContent(text="Error: No context"))
+
+        summary, sub_graph = await self.spawn(
+            context=execution_context,
             system_prompt="You are an expert security auditor...",
             user_message=f"Audit the file: {input.file_path}",
             tools=[ReadTool()],
         )
-        return TextContent(text=summary)
+        return ToolResult(
+            content=TextContent(text=summary),
+            sub_graph=sub_graph,
+        )
 ```
 
-The `SubAgentTool` base class handles:
-- ExecutionContext injection
-- SubGraph storage (accessible via `self.last_sub_graph`)
-- Sub-agent spawning via `spawn()` helper
+The `SubAgentTool` base class provides:
+- Pure functional design (no mutation)
+- `spawn()` helper that returns `(summary, sub_graph)` tuple
+- `ToolResult` dataclass for returning content and sub_graph together
 
 Sub-agents support recursive nesting (depth tracking) and parallel execution.
 
@@ -179,5 +192,5 @@ Sub-agents support recursive nesting (depth tracking) and parallel execution.
 - `ClaudeAPI()` uses `ANTHROPIC_API_KEY` env var
 - `ClaudeCodeAPI()` uses Claude Code OAuth (no API key needed)
 - `GeminiAPI()` uses `GEMINI_API_KEY` env var
-- Tools return `TextContent` or `list[TextContent]`
+- `Tool.execute()` returns `ToolResult` containing `content` and optional `sub_graph`
 - `ToolResultContent.tool_name` is for display only - excluded from API calls via `to_dict()`

@@ -6,10 +6,13 @@ import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from ..data_structures import TextContent
 from .base import Desc, Tool, _format_size
+
+if TYPE_CHECKING:
+    from ..execution_context import ExecutionContext
 
 
 @dataclass
@@ -42,7 +45,11 @@ Examples:
 
 Note: Requires 'file' and 'wc' commands (standard on Unix systems)."""
 
-    async def __call__(self, input: StatInput) -> TextContent:
+    async def __call__(
+        self,
+        input: StatInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> TextContent:
         """Get file metadata."""
         path = Path(input.file_path)
 

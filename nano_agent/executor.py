@@ -47,12 +47,10 @@ async def run(
         Message,
         Role,
         StopReason,
-        SubGraph,
         ToolExecution,
         ToolResultContent,
     )
     from .execution_context import ExecutionContext
-    from .tools.base import SubAgentCapable
 
     # Get tools from DAG
     tools = dag._tools or ()
@@ -185,14 +183,13 @@ async def run(
             )
 
             # Use execute() to convert dict input to typed dataclass
-            result: TextContent | list[TextContent]
             try:
                 if cancel_token:
-                    result = await cancel_token.run(
+                    tool_result = await cancel_token.run(
                         tool.execute(call.input, execution_context=current_context)
                     )
                 else:
-                    result = await tool.execute(
+                    tool_result = await tool.execute(
                         call.input, execution_context=current_context
                     )
             except asyncio.CancelledError:
@@ -200,19 +197,16 @@ async def run(
                 cancelled = True
                 break
 
-            # Normalize to list
+            # Normalize content to list
+            result = tool_result.content
             result_list = result if isinstance(result, list) else [result]
 
-            # Check if tool captured a SubGraph (sub-agent execution)
+            # Check if tool returned a SubGraph (sub-agent execution)
             # SubGraph runs first, then produces the ToolExecution result
             sub_graph_node = None
-            if isinstance(tool, SubAgentCapable):
-                sub_graph = getattr(tool, "last_sub_graph", None)
-                if isinstance(sub_graph, SubGraph):
-                    # SubGraph is first (sub-agent runs)
-                    sub_graph_node = tool_use_head.child(sub_graph)
-                    # Clear the stored SubGraph to avoid duplication
-                    object.__setattr__(tool, "last_sub_graph", None)
+            if tool_result.sub_graph is not None:
+                # SubGraph is first (sub-agent runs)
+                sub_graph_node = tool_use_head.child(tool_result.sub_graph)
 
             # Create ToolExecution node (the result)
             # If sub-agent ran, ToolExecution is child of SubGraph

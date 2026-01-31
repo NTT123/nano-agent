@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from ..data_structures import TextContent
 from .base import Desc, Tool
+
+if TYPE_CHECKING:
+    from ..execution_context import ExecutionContext
 
 
 @dataclass
@@ -38,7 +41,11 @@ Usage notes:
   - You can specify an optional timeout in seconds (up to 600 seconds / 10 minutes).
   - If the output exceeds 30000 characters, output will be truncated."""
 
-    async def __call__(self, input: BashInput) -> TextContent:
+    async def __call__(
+        self,
+        input: BashInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> TextContent:
         """Execute a bash command with cancellation-safe subprocess handling."""
         if not input.command:
             return TextContent(text="Error: No command provided")

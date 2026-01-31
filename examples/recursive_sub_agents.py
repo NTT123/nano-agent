@@ -50,12 +50,13 @@ from typing import Annotated
 from nano_agent import (
     DAG,
     ClaudeCodeAPI,
+    ExecutionContext,
     ReadTool,
     SubAgentTool,
     TextContent,
     run,
 )
-from nano_agent.tools.base import Desc
+from nano_agent.tools.base import Desc, ToolResult
 
 # Import the existing viewer for HTML generation
 from scripts.viewer import view_file
@@ -83,7 +84,14 @@ class SecurityAuditTool(SubAgentTool):
     name: str = "SecurityAudit"
     description: str = "Spawn a sub-agent to audit code for security vulnerabilities"
 
-    async def __call__(self, input: SecurityAuditInput) -> TextContent:
+    async def __call__(
+        self,
+        input: SecurityAuditInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> ToolResult:
+        if not execution_context:
+            return ToolResult(content=TextContent(text="Error: No execution context"))
+
         system_prompt = """You are an expert security auditor. Your task is to analyze code
 for potential security vulnerabilities.
 
@@ -96,18 +104,22 @@ Look for:
 
 Use the Read tool to examine the file, then provide a concise security assessment."""
 
-        summary = await self.spawn(
+        summary, sub_graph = await self.spawn(
+            context=execution_context,
             system_prompt=system_prompt,
             user_message=f"Perform a security audit on: {input.file_path}",
             tools=[ReadTool()],
             tool_name="SecurityAuditor",
         )
 
-        return TextContent(
-            text=f"Security Audit Complete\n"
-            f"File: {input.file_path}\n"
-            f"---\n"
-            f"{summary}"
+        return ToolResult(
+            content=TextContent(
+                text=f"Security Audit Complete\n"
+                f"File: {input.file_path}\n"
+                f"---\n"
+                f"{summary}"
+            ),
+            sub_graph=sub_graph,
         )
 
 
@@ -129,7 +141,14 @@ class DocSummaryTool(SubAgentTool):
     name: str = "DocSummary"
     description: str = "Spawn a sub-agent to summarize code documentation and comments"
 
-    async def __call__(self, input: DocSummaryInput) -> TextContent:
+    async def __call__(
+        self,
+        input: DocSummaryInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> ToolResult:
+        if not execution_context:
+            return ToolResult(content=TextContent(text="Error: No execution context"))
+
         system_prompt = """You are an expert technical writer. Your task is to summarize
 the documentation and comments in code files.
 
@@ -141,18 +160,22 @@ Provide:
 
 Use the Read tool to examine the file, then provide a concise documentation summary."""
 
-        summary = await self.spawn(
+        summary, sub_graph = await self.spawn(
+            context=execution_context,
             system_prompt=system_prompt,
             user_message=f"Summarize the documentation in: {input.file_path}",
             tools=[ReadTool()],
             tool_name="DocSummarizer",
         )
 
-        return TextContent(
-            text=f"Documentation Summary Complete\n"
-            f"File: {input.file_path}\n"
-            f"---\n"
-            f"{summary}"
+        return ToolResult(
+            content=TextContent(
+                text=f"Documentation Summary Complete\n"
+                f"File: {input.file_path}\n"
+                f"---\n"
+                f"{summary}"
+            ),
+            sub_graph=sub_graph,
         )
 
 
@@ -183,7 +206,14 @@ class ProjectAnalyzerTool(SubAgentTool):
         "security auditing and documentation summarization tools"
     )
 
-    async def __call__(self, input: ProjectAnalyzerInput) -> TextContent:
+    async def __call__(
+        self,
+        input: ProjectAnalyzerInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> ToolResult:
+        if not execution_context:
+            return ToolResult(content=TextContent(text="Error: No execution context"))
+
         system_prompt = """You are a project analyst that coordinates comprehensive code analysis.
 
 You have access to two specialized tools:
@@ -197,18 +227,22 @@ After receiving results from both tools, provide a brief combined analysis."""
 
         # Note: SecurityAuditTool and DocSummaryTool are SubAgentTool!
         # When the sub-agent calls them, they will spawn their own sub-agents.
-        summary = await self.spawn(
+        summary, sub_graph = await self.spawn(
+            context=execution_context,
             system_prompt=system_prompt,
             user_message=f"Analyze {input.file_path}. Use BOTH the SecurityAudit and DocSummary tools.",
             tools=[SecurityAuditTool(), DocSummaryTool()],
             tool_name="ProjectAnalyzer",
         )
 
-        return TextContent(
-            text=f"Project Analysis Complete\n"
-            f"File: {input.file_path}\n"
-            f"---\n"
-            f"{summary}"
+        return ToolResult(
+            content=TextContent(
+                text=f"Project Analysis Complete\n"
+                f"File: {input.file_path}\n"
+                f"---\n"
+                f"{summary}"
+            ),
+            sub_graph=sub_graph,
         )
 
 

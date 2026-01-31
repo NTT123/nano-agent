@@ -5,10 +5,13 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from ..data_structures import TextContent
 from .base import Desc, Tool
+
+if TYPE_CHECKING:
+    from ..execution_context import ExecutionContext
 
 
 def _find_match_line(content: str, old_string: str) -> tuple[int, int]:
@@ -136,7 +139,11 @@ Usage:
     # Signature: async (file_path, preview, match_count) -> bool
     permission_callback: PermissionCallback | None = field(default=None, repr=False)
 
-    async def __call__(self, input: EditInput) -> TextContent:
+    async def __call__(
+        self,
+        input: EditInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> TextContent:
         """Validate edit, show preview, ask permission, and apply if approved."""
         path = Path(input.file_path)
 

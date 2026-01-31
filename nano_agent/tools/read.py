@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated, ClassVar
+from typing import TYPE_CHECKING, Annotated, ClassVar
 
 from ..data_structures import TextContent
 from .base import Desc, Tool, TruncationConfig, _format_size
+
+if TYPE_CHECKING:
+    from ..execution_context import ExecutionContext
 
 
 @dataclass
@@ -50,7 +53,11 @@ Note: For binary files (images, PDFs), content is processed differently."""
     # Disable truncation - ReadTool already limits to MAX_LINES
     _truncation_config: ClassVar[TruncationConfig] = TruncationConfig(enabled=False)
 
-    async def __call__(self, input: ReadInput) -> TextContent:
+    async def __call__(
+        self,
+        input: ReadInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> TextContent:
         """Read file contents with metadata and smart defaults."""
         path = Path(input.file_path)
 

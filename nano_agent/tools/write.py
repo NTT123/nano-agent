@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 
 from ..data_structures import TextContent
 from .base import Desc, Tool, _format_size
+
+if TYPE_CHECKING:
+    from ..execution_context import ExecutionContext
 
 
 @dataclass
@@ -34,7 +37,11 @@ Usage:
 - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
 - Creates parent directories if they don't exist."""
 
-    async def __call__(self, input: WriteInput) -> TextContent:
+    async def __call__(
+        self,
+        input: WriteInput,
+        execution_context: ExecutionContext | None = None,
+    ) -> TextContent:
         """Write content to file."""
         path = Path(input.file_path)
 

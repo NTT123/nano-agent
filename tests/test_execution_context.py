@@ -5,10 +5,11 @@ import pytest
 from nano_agent import (
     DAG,
     ExecutionContext,
-    SubAgentCapable,
+    SubAgentTool,
     SubGraph,
     TextContent,
     Tool,
+    ToolResult,
 )
 from nano_agent.data_structures import parse_sub_graph
 
@@ -248,32 +249,31 @@ class TestParseSubGraph:
         assert parse_sub_graph([]) is None
 
 
-class TestSubAgentCapable:
-    """Tests for SubAgentCapable protocol."""
+class TestSubAgentTool:
+    """Tests for SubAgentTool base class."""
 
-    def test_protocol_check(self):
-        """Test that SubAgentCapable is a runtime checkable protocol."""
-        from dataclasses import dataclass, field
+    def test_subagent_tool_is_tool(self):
+        """Test that SubAgentTool is a subclass of Tool."""
+        from dataclasses import dataclass
 
         @dataclass
-        class MockSubAgentTool(Tool, SubAgentCapable):
+        class MockSubAgentTool(SubAgentTool):
             name: str = "MockSubAgent"
             description: str = "A mock sub-agent tool"
-            _execution_context: ExecutionContext | None = field(
-                default=None, repr=False
-            )
 
-            def set_execution_context(self, ctx):
-                object.__setattr__(self, "_execution_context", ctx)
-
-            async def __call__(self, input=None):
-                return TextContent(text="result")
+            async def __call__(
+                self,
+                input=None,
+                execution_context: ExecutionContext | None = None,
+            ) -> ToolResult:
+                return ToolResult(content=TextContent(text="result"))
 
         tool = MockSubAgentTool()
-        assert isinstance(tool, SubAgentCapable)
+        assert isinstance(tool, Tool)
+        assert isinstance(tool, SubAgentTool)
 
-    def test_non_subagent_tool(self):
-        """Test that regular tools are not SubAgentCapable."""
+    def test_regular_tool_not_subagent(self):
+        """Test that regular tools are not SubAgentTool."""
         from dataclasses import dataclass
 
         @dataclass
@@ -285,7 +285,8 @@ class TestSubAgentCapable:
                 return TextContent(text="result")
 
         tool = RegularTool()
-        assert not isinstance(tool, SubAgentCapable)
+        assert isinstance(tool, Tool)
+        assert not isinstance(tool, SubAgentTool)
 
 
 class TestDAGSubGraph:
