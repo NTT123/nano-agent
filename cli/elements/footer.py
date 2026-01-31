@@ -7,9 +7,10 @@ This module provides:
 
 from __future__ import annotations
 
+import shutil
 from dataclasses import dataclass, field
 
-from .terminal import TerminalRegion
+from .terminal import ANSI, TerminalRegion
 
 
 @dataclass
@@ -90,7 +91,11 @@ class TerminalFooter:
         if self._status.activity:
             parts.append("\033[2m(Esc to cancel)\033[0m")
 
-        return " • ".join(parts)
+        line = " • ".join(parts)
+
+        # Truncate to terminal width
+        terminal_width = shutil.get_terminal_size().columns
+        return ANSI.truncate_to_width(line, terminal_width)
 
     def _get_all_lines(self) -> list[str]:
         """Get all lines to render (content + status bar)."""

@@ -111,6 +111,47 @@ class ANSI:
         """Calculate visual length of string, excluding ANSI escape codes."""
         return len(cls.strip_ansi(s))
 
+    @classmethod
+    def truncate_to_width(cls, s: str, max_width: int, ellipsis: str = "…") -> str:
+        """Truncate string to max visual width, preserving ANSI codes.
+
+        If truncation is needed, adds ellipsis and RESET code at the end.
+        """
+        if max_width <= 0:
+            return ""
+
+        visual_len = cls.visual_len(s)
+        if visual_len <= max_width:
+            return s
+
+        # Account for ellipsis in target width
+        target_width = max_width - len(ellipsis)
+        if target_width <= 0:
+            return ellipsis[:max_width]
+
+        # Walk through string, tracking visual position
+        result = []
+        visual_pos = 0
+        i = 0
+
+        while i < len(s) and visual_pos < target_width:
+            # Check for ANSI escape sequence
+            if s[i] == "\033" and i + 1 < len(s) and s[i + 1] == "[":
+                # Find end of escape sequence
+                j = i + 2
+                while j < len(s) and s[j] not in "mHJK":
+                    j += 1
+                if j < len(s):
+                    j += 1  # Include the final character
+                result.append(s[i:j])
+                i = j
+            else:
+                result.append(s[i])
+                visual_pos += 1
+                i += 1
+
+        return "".join(result) + ellipsis + cls.RESET
+
     # Direct write helpers (write to stdout and flush)
     @classmethod
     def _write(cls, s: str) -> None:
