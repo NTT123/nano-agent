@@ -475,34 +475,45 @@ class TerminalRegion:
     - Rendering lines to the region
     - Clearing the region
     - Restoring when done
+
+    Uses explicit cursor movement (cursor_up) instead of save/restore
+    sequences, which are more reliable across different terminals.
     """
 
     def __init__(self) -> None:
         self.num_lines = 0
         self._active = False
+        self._cursor_at_line = 0  # Track which line cursor is on (0 = top of region)
 
     def _write(self, s: str) -> None:
         """Write to stdout without newline."""
         ANSI._write(s)
 
+    def _move_to_region_start(self) -> None:
+        """Move cursor to the start of the region (top-left)."""
+        if self._cursor_at_line > 0:
+            ANSI.move_up(self._cursor_at_line)
+        self._write(ANSI.CARRIAGE_RETURN)
+        self._cursor_at_line = 0
+
     def activate(self, num_lines: int) -> None:
         """Reserve space at bottom of terminal."""
         self.num_lines = num_lines
         self._active = True
+        self._cursor_at_line = 0
 
         # Hide terminal cursor (we render our own cursor glyph)
         ANSI.hide_cursor()
         # Clear current line and use it as region start
         ANSI.clear_line()
-        ANSI.save_cursor()
 
     def render(self, lines: list[str]) -> None:
         """Render lines to the region."""
         if not self._active:
             return
 
-        # Restore to region start
-        ANSI.restore_cursor()
+        # Move to region start
+        self._move_to_region_start()
 
         # Render each line
         for i in range(self.num_lines):
@@ -514,13 +525,15 @@ class TerminalRegion:
                 # Move down one row and to column 1
                 self._write("\n")
                 self._write(ANSI.CARRIAGE_RETURN)
+                self._cursor_at_line = i + 1
 
         # Position cursor at end of last line (for visual feedback)
-        ANSI.restore_cursor()  # Back to region start
+        self._move_to_region_start()
         if lines:
             last_line_idx = min(len(lines), self.num_lines) - 1
             if last_line_idx > 0:
                 ANSI.move_down(last_line_idx)
+                self._cursor_at_line = last_line_idx
             # Use visual length to account for ANSI escape codes
             visual_width = ANSI.visual_len(lines[last_line_idx])
             if visual_width > 0:
@@ -533,15 +546,19 @@ class TerminalRegion:
             extra = num_lines - self.num_lines
 
             # Move to end of current region
-            ANSI.restore_cursor()
-            ANSI.move_down(self.num_lines)
+            lines_to_move = self.num_lines - self._cursor_at_line
+            if lines_to_move > 0:
+                ANSI.move_down(lines_to_move)
+                self._cursor_at_line = self.num_lines
 
             # Add new lines (scrolls up)
             self._write("\n" * extra)
+            self._cursor_at_line += extra
 
-            # Move back to start and update saved position
+            # Move back to start
             ANSI.move_up(num_lines)
-            ANSI.save_cursor()
+            self._write(ANSI.CARRIAGE_RETURN)
+            self._cursor_at_line = 0
 
             self.num_lines = num_lines
 
@@ -551,15 +568,16 @@ class TerminalRegion:
             return
 
         # Clear the region lines so prompts don't linger in scrollback
-        ANSI.restore_cursor()
+        self._move_to_region_start()
         for i in range(self.num_lines):
             ANSI.clear_line()
             if i < self.num_lines - 1:
                 ANSI.move_down(1)
                 self._write(ANSI.CARRIAGE_RETURN)
+                self._cursor_at_line = i + 1
 
         # Return cursor to region start (cleared) without adding new lines
-        ANSI.restore_cursor()
+        self._move_to_region_start()
         ANSI.clear_line()
 
         # Show terminal cursor again
@@ -567,3 +585,4 @@ class TerminalRegion:
 
         self._active = False
         self.num_lines = 0
+        self._cursor_at_line = 0
