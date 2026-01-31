@@ -12,6 +12,8 @@ from .base import (
     InputSchemaDict,
     Question,
     QuestionOption,
+    SubAgentCapable,
+    SubAgentTool,
     Tool,
     ToolDict,
     TruncatedOutput,
@@ -72,12 +74,14 @@ def get_default_tools() -> list[Tool]:
 __all__ = [
     # Base classes and utilities
     "Tool",
+    "SubAgentTool",
     "ToolDict",
     "InputSchemaDict",
     "Desc",
     "Field",
     "TruncationConfig",
     "TruncatedOutput",
+    "SubAgentCapable",
     "get_call_input_type",
     "convert_input",
     "schema_from_dataclass",

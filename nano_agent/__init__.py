@@ -42,7 +42,7 @@ from .codex_auth import (
 from .dag import DAG, Node
 
 # Data structures - Core types
-from .data_structures import (  # Enums; Content blocks (sum type: ContentBlock); Messages; Node data (sum type: NodeData); Exhaustiveness helper; JSON type aliases; Serialization TypedDicts (for type-safe dict handling)
+from .data_structures import (  # Enums; Content blocks (sum type: ContentBlock); Messages; Node data (sum type: NodeData); Exhaustiveness helper; JSON type aliases; Serialization TypedDicts (for type-safe dict handling); Sub-agent support
     ContentBlock,
     ContentBlockDict,
     JSONObject,
@@ -55,6 +55,7 @@ from .data_structures import (  # Enums; Content blocks (sum type: ContentBlock)
     Role,
     StopReason,
     StopReasonDict,
+    SubGraph,
     SummaryItem,
     SystemPrompt,
     SystemPromptDict,
@@ -74,6 +75,9 @@ from .data_structures import (  # Enums; Content blocks (sum type: ContentBlock)
     UsageDict,
     assert_never,
 )
+
+# Execution context and sub-agent support
+from .execution_context import ExecutionContext, run_sub_agent
 
 # Executor
 from .executor import run
@@ -105,6 +109,8 @@ from .tools import (
     ReadTool,
     StatInput,
     StatTool,
+    SubAgentCapable,
+    SubAgentTool,
     Todo,
     TodoItemInput,
     TodoStatus,
@@ -166,9 +172,15 @@ __all__ = [
     "ToolDefinitions",
     "ToolExecution",
     "StopReason",
+    "SubGraph",
     "Usage",
+    # Execution context and sub-agent support
+    "ExecutionContext",
+    "run_sub_agent",
+    "SubAgentCapable",
     # Tools
     "Tool",
+    "SubAgentTool",
     "schema_from_dataclass",
     "get_call_input_type",
     "convert_input",

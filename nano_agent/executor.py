@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable
+from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 import httpx
 
@@ -11,6 +11,9 @@ from .api_base import APIError, APIProtocol
 from .cancellation import CancellationToken
 from .dag import DAG
 from .data_structures import Response, TextContent
+
+if TYPE_CHECKING:
+    from .execution_context import ExecutionContext
 
 # Type alias for permission callback
 # Takes (tool_name, tool_input) and returns True if allowed, False if denied
@@ -22,6 +25,7 @@ async def run(
     dag: DAG,
     cancel_token: CancellationToken | None = None,
     permission_callback: PermissionCallback | None = None,
+    execution_context: "ExecutionContext | None" = None,
 ) -> DAG:
     """Run agent loop until stop reason or cancellation.
 
@@ -32,6 +36,8 @@ async def run(
         permission_callback: Optional async callback for tool permission checks.
             Called with (tool_name, tool_input). Returns True to allow, False to deny.
             Currently used for EditConfirm to require user confirmation.
+        execution_context: Optional execution context for sub-agent support.
+            If not provided, one will be created automatically.
 
     Returns:
         Final DAG with all messages and tool results
@@ -41,13 +47,25 @@ async def run(
         Message,
         Role,
         StopReason,
+        SubGraph,
         ToolExecution,
         ToolResultContent,
     )
+    from .execution_context import ExecutionContext
+    from .tools.base import SubAgentCapable
 
     # Get tools from DAG
     tools = dag._tools or ()
     tool_map = {tool.name: tool for tool in tools}
+
+    # Create execution context if not provided
+    if execution_context is None:
+        execution_context = ExecutionContext(
+            api=api,
+            dag=dag,
+            cancel_token=cancel_token,
+            permission_callback=permission_callback,
+        )
 
     # Track cumulative usage
     total_usage = {
@@ -155,13 +173,28 @@ async def run(
                     )
                     continue  # Skip actual execution
 
+            # Create current execution context for this call
+            # (DAG is updated as we process, so context needs fresh reference)
+            current_context = ExecutionContext(
+                api=api,
+                dag=dag,
+                cancel_token=cancel_token,
+                permission_callback=permission_callback,
+                depth=execution_context.depth,
+                max_depth=execution_context.max_depth,
+            )
+
             # Use execute() to convert dict input to typed dataclass
             result: TextContent | list[TextContent]
             try:
                 if cancel_token:
-                    result = await cancel_token.run(tool.execute(call.input))
+                    result = await cancel_token.run(
+                        tool.execute(call.input, execution_context=current_context)
+                    )
                 else:
-                    result = await tool.execute(call.input)
+                    result = await tool.execute(
+                        call.input, execution_context=current_context
+                    )
             except asyncio.CancelledError:
                 cancelled_at_index = i  # Tool was running when cancelled
                 cancelled = True
@@ -170,14 +203,29 @@ async def run(
             # Normalize to list
             result_list = result if isinstance(result, list) else [result]
 
-            # Create branch node with ToolExecution (for visualization)
-            result_node = tool_use_head.child(
+            # Check if tool captured a SubGraph (sub-agent execution)
+            # SubGraph runs first, then produces the ToolExecution result
+            sub_graph_node = None
+            if isinstance(tool, SubAgentCapable):
+                sub_graph = getattr(tool, "last_sub_graph", None)
+                if isinstance(sub_graph, SubGraph):
+                    # SubGraph is first (sub-agent runs)
+                    sub_graph_node = tool_use_head.child(sub_graph)
+                    # Clear the stored SubGraph to avoid duplication
+                    object.__setattr__(tool, "last_sub_graph", None)
+
+            # Create ToolExecution node (the result)
+            # If sub-agent ran, ToolExecution is child of SubGraph
+            # Otherwise, ToolExecution is child of tool_use_head
+            parent_node = sub_graph_node if sub_graph_node else tool_use_head
+            result_node = parent_node.child(
                 ToolExecution(
                     tool_name=call.name,
                     tool_use_id=call.id,
                     result=result_list,
                 )
             )
+
             result_nodes.append(result_node)
 
             # Collect tool results for API

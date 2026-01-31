@@ -141,6 +141,39 @@ for call in response.get_tool_use():
     dag = dag.tool_result(ToolResultContent(tool_use_id=call.id, content=[result]))
 ```
 
+## Sub-Agents
+
+Tools can spawn sub-agents using the `SubAgentTool` base class:
+
+```python
+from nano_agent import SubAgentTool, TextContent, ReadTool
+from nano_agent.tools.base import Desc
+
+@dataclass
+class SecurityAuditInput:
+    file_path: Annotated[str, Desc("Path to the file to audit")]
+
+@dataclass
+class SecurityAuditTool(SubAgentTool):
+    name: str = "SecurityAudit"
+    description: str = "Spawn a sub-agent to audit code for security issues"
+
+    async def __call__(self, input: SecurityAuditInput) -> TextContent:
+        summary = await self.spawn(
+            system_prompt="You are an expert security auditor...",
+            user_message=f"Audit the file: {input.file_path}",
+            tools=[ReadTool()],
+        )
+        return TextContent(text=summary)
+```
+
+The `SubAgentTool` base class handles:
+- ExecutionContext injection
+- SubGraph storage (accessible via `self.last_sub_graph`)
+- Sub-agent spawning via `spawn()` helper
+
+Sub-agents support recursive nesting (depth tracking) and parallel execution.
+
 ## Notes
 
 - `ClaudeAPI()` uses `ANTHROPIC_API_KEY` env var

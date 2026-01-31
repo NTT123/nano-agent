@@ -37,6 +37,7 @@ from .data_structures import (
     Response,
     Role,
     StopReason,
+    SubGraph,
     SystemPrompt,
     TextContent,
     ThinkingContent,
@@ -48,6 +49,7 @@ from .data_structures import (
     ToolUseContent,
     parse_message_content,
     parse_stop_reason,
+    parse_sub_graph,
     parse_tool_definitions,
     parse_tool_execution,
 )
@@ -249,6 +251,8 @@ class Node:
                 node_data = parse_tool_execution(node_data_raw)
             elif node_type == "stop_reason":
                 node_data = parse_stop_reason(node_data_raw)
+            elif node_type == "sub_graph":
+                node_data = parse_sub_graph(node_data_raw)
 
             if node_data is None and "role" in node_data_raw:
                 # It's a Message
@@ -597,6 +601,17 @@ class DAG:
             self._append_to_heads(Message(Role.USER, list(tool_results)))
         )
 
+    def sub_graph(self, sub_graph: SubGraph) -> DAG:
+        """Add a sub-graph node (encapsulated sub-agent execution).
+
+        Args:
+            sub_graph: SubGraph containing the sub-agent's execution
+
+        Returns:
+            New DAG instance with sub-graph added
+        """
+        return self._with_heads(self._append_to_heads(sub_graph))
+
     # -------------------------------------------------------------------------
     # Tool execution helpers (the key innovation)
     # -------------------------------------------------------------------------
@@ -913,6 +928,11 @@ class DAG:
 
         elif isinstance(data, StopReason):
             return "STOP", data.reason
+
+        elif isinstance(data, SubGraph):
+            depth_str = f"[d={data.depth}]" if data.depth > 0 else ""
+            summary = truncate(data.summary, 30) if data.summary else "(no summary)"
+            return "SUBGRAPH", f"{data.tool_name}{depth_str} -> {summary}"
 
         elif isinstance(data, Message):
             role = data.role.value.upper()

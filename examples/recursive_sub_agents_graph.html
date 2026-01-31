@@ -1,0 +1,1526 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Node Graph Viewer</title>
+<script src="https://d3js.org/d3.v7.min.js"></script>
+<script src="https://unpkg.com/@dagrejs/dagre@1.0.4/dist/dagre.min.js"></script>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; height: 100vh; background: #1a1a2e; color: #eee; }
+#breadcrumb { background: #0f0f23; border-bottom: 1px solid #333; padding: 10px 20px; display: flex; align-items: center; gap: 8px; min-height: 44px; }
+#breadcrumb .crumb { color: #888; cursor: pointer; padding: 4px 10px; border-radius: 4px; font-size: 13px; transition: all 0.2s; }
+#breadcrumb .crumb:hover { background: #1a1a3e; color: #fff; }
+#breadcrumb .crumb.active { background: #ff9800; color: #000; font-weight: 600; cursor: default; }
+#breadcrumb .sep { color: #555; font-size: 14px; }
+#breadcrumb .hint { color: #666; font-size: 11px; margin-left: auto; font-style: italic; }
+#main-container { flex: 1; display: flex; overflow: hidden; }
+#graph { flex: 1; overflow: hidden; }
+#detail { width: 400px; background: #16213e; border-left: 1px solid #333; overflow-y: auto; display: none; }
+#detail.active { display: block; }
+#detail-header { padding: 15px; background: #1a1a2e; border-bottom: 1px solid #333; display: flex; justify-content: space-between; align-items: center; }
+#detail-header h3 { font-size: 14px; color: #888; }
+#detail-close { background: none; border: none; color: #888; font-size: 20px; cursor: pointer; }
+#detail-close:hover { color: #fff; }
+#detail-content { padding: 15px; }
+.detail-section { margin-bottom: 20px; }
+.detail-section h4 { font-size: 11px; text-transform: uppercase; color: #666; margin-bottom: 8px; letter-spacing: 1px; }
+.detail-section pre { background: #0f0f23; padding: 12px; border-radius: 6px; font-size: 12px; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+.detail-section .value { background: #0f0f23; padding: 8px 12px; border-radius: 6px; font-size: 13px; }
+.tools-list { background: #0f0f23; border-radius: 6px; padding: 8px 0; }
+.tool-item { padding: 8px 12px; border-bottom: 1px solid #1a1a2e; }
+.tool-item:last-child { border-bottom: none; }
+.tool-name { color: #d9944a; font-weight: 600; font-size: 14px; margin-bottom: 6px; }
+.tool-desc { color: #ccc; font-size: 12px; margin-top: 4px; line-height: 1.5; white-space: pre-wrap; }
+.tool-schema { margin-top: 10px; }
+.tool-schema .schema-label { color: #666; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+.tool-schema pre { margin-top: 4px; font-size: 11px; background: #0a0a1a; padding: 10px; border-radius: 4px; }
+.content-block { margin-bottom: 12px; border-radius: 6px; overflow: hidden; }
+.content-block:last-child { margin-bottom: 0; }
+.block-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; padding: 6px 10px; font-weight: 600; }
+.block-content { padding: 10px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+.content-text { background: #0f0f23; }
+.content-text .block-label { background: #1a1a3e; color: #888; }
+.content-text .block-content { color: #eee; }
+.content-thinking { background: #1a1a0f; border: 1px solid #3d3d1a; }
+.content-thinking .block-label { background: #2d2d1a; color: #d4c057; }
+.content-thinking .block-content { color: #c9b84c; font-style: italic; }
+.content-tool-use { background: #0f1a1a; border: 1px solid #1a3d3d; }
+.content-tool-use .block-label { background: #1a2d2d; color: #57b4d4; }
+.content-tool-use .block-content { color: #4cc9c9; }
+.content-tool-result { background: #0f1a0f; border: 1px solid #1a3d1a; }
+.content-tool-result .block-label { background: #1a2d1a; color: #57d457; }
+.content-tool-result .block-content { color: #4cc94c; }
+.content-system { background: #0f1a2a; border: 1px solid #1a3d5d; }
+.content-system .block-label { background: #1a2d4d; color: #5794d4; }
+.content-system .block-content { color: #8ab4e8; }
+.content-user { background: #0f2a1a; border: 1px solid #1a5d3d; }
+.content-user .block-label { background: #1a4d2d; color: #57d494; }
+.content-user .block-content { color: #8ae8b4; }
+.content-tool-exec { background: #2a1a0f; border: 1px solid #5d3d1a; }
+.content-tool-exec .block-label { background: #4d2d1a; color: #d49457; }
+.content-tool-exec .block-content { color: #e8b48a; }
+.node { cursor: pointer; }
+.node rect { stroke-width: 2px; }
+.node text { font-size: 11px; fill: #333; }
+.node.selected rect { stroke: #ffd700 !important; stroke-width: 3px; }
+.edge { fill: none; stroke: #555; stroke-width: 2px; }
+.edge-arrow { fill: #555; }
+.type-system_prompt rect { fill: #e6f3ff; stroke: #4a90d9; }
+.type-tool_definitions rect { fill: #fff3e6; stroke: #d9944a; }
+.type-message_user rect { fill: #e6ffe6; stroke: #4ad94a; }
+.type-message_assistant rect { fill: #f5f5f5; stroke: #888; }
+.type-tool_exec rect { fill: #fff0e6; stroke: #d97a4a; }
+.type-dict rect { fill: #ffe6f3; stroke: #d94a90; }
+.type-stop_reason rect { fill: #ff5555; stroke: #ff0000; }
+.type-stop_reason text { fill: #fff !important; font-weight: bold; }
+/* SubGraph nodes: dashed border, clickable indicator */
+.type-sub_graph rect { fill: #fff3e0; stroke: #ff9800; stroke-dasharray: 5,3; }
+.type-sub_graph text { fill: #e65100 !important; font-weight: bold; }
+.type-sub_graph:hover rect { stroke-width: 3px; }
+/* Zoom button styles */
+.zoom-btn { background: #ff9800; color: #000; border: none; padding: 10px 20px; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; width: 100%; margin-top: 10px; transition: all 0.2s; }
+.zoom-btn:hover { background: #ffa726; transform: translateY(-1px); }
+.zoom-btn.zoom-out { background: #666; color: #fff; }
+.zoom-btn.zoom-out:hover { background: #888; }
+svg { width: 100%; height: 100%; }
+</style>
+</head>
+<body>
+<div id="breadcrumb">
+  <span class="crumb active">Main</span>
+  <span class="hint">Click SubGraph nodes for zoom button</span>
+</div>
+<div id="main-container">
+<div id="graph"></div>
+<div id="detail">
+  <div id="detail-header">
+    <h3>NODE DETAILS</h3>
+    <button id="detail-close">&times;</button>
+  </div>
+  <div id="detail-content"></div>
+</div>
+</div>
+
+<script>
+const graphData = {
+  "meta": {
+    "session_id": "recursive_sub_agents_demo",
+    "created_at": 1769845389.9323142
+  },
+  "nodes": [
+    {
+      "id": "dcf4efcc07d7",
+      "type": "system_prompt",
+      "label": "SYSTEM",
+      "timestamp": 1769845345.66572,
+      "metadata": {},
+      "data": {
+        "type": "system_prompt",
+        "content": "You are a helpful assistant with a powerful project analysis tool.\n\nWhen asked to analyze a project or file, use the ProjectAnalyzer tool.\nThis tool will spawn specialized sub-agents to perform comprehensive analysis."
+      },
+      "parent_count": 0
+    },
+    {
+      "id": "b856eb587f22",
+      "type": "tool_definitions",
+      "label": "TOOLS (1)",
+      "timestamp": 1769845345.665749,
+      "metadata": {},
+      "data": {
+        "type": "tool_definitions",
+        "tools": [
+          {
+            "name": "ProjectAnalyzer",
+            "description": "Spawn a sub-agent to perform comprehensive project analysis using security auditing and documentation summarization tools",
+            "input_schema": {
+              "type": "object",
+              "properties": {
+                "file_path": {
+                  "type": "string",
+                  "description": "Path to the file to analyze"
+                }
+              },
+              "required": [
+                "file_path"
+              ],
+              "additionalProperties": false
+            }
+          }
+        ]
+      },
+      "parent_count": 1
+    },
+    {
+      "id": "6549c9873f9e",
+      "type": "message_user",
+      "label": "USER: Analyze the file exa",
+      "timestamp": 1769845345.6657631,
+      "metadata": {},
+      "data": {
+        "role": "user",
+        "content": "Analyze the file examples/hello_world.py using the ProjectAnalyzer tool."
+      },
+      "parent_count": 1
+    },
+    {
+      "id": "669ccd4bebbb",
+      "type": "message_assistant",
+      "label": "ASST: \u2190result \u2192ProjectAnal",
+      "timestamp": 1769845348.03904,
+      "metadata": {},
+      "data": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The user wants me to analyze a specific file using the ProjectAnalyzer tool. Let me invoke that tool with the file path they specified.",
+            "signature": "ErACCkYICxgCKkDre+qEeQvgFW0zNky7i3/xNWl6I5vPYgo5EXnz4UY9jXP9iuBKwAqreGZu+baGIND6+EoCPLfwky1bQq3rUyAxEgzaryPYJIxuD1Rgmg0aDNHIHiUosmXKZ3WMXyIwmlbzEswiDmzmlq8af79RgzQCqvLx4nsl8fO5tN9k/LnamGzpfhTIXhZHsPKuSDSXKpcB6vnAnrfocGENV+PkX015e1wdkUhzsHKljdS/da7oaVGPGrgN3r8FjeLVHJrOjIEDQYBrHswqHO7igkgBwTUvfDDlLNXmmekIccBUGDnKGNn1g1zuI3xS3oksO2uyHGU4VTzyMV9p5FI2lZoVNOgb8AqW580sNSmZydpZmdHhikUnXCR2S8NXgnYbfamtSLtr6pQPP4M+HxgB"
+          },
+          {
+            "type": "tool_use",
+            "id": "toolu_01MaBQFGCt4zcy9cB2XoFk6Y",
+            "name": "ProjectAnalyzer",
+            "input": {
+              "file_path": "examples/hello_world.py"
+            }
+          }
+        ]
+      },
+      "parent_count": 1
+    },
+    {
+      "id": "f9fe4550c594",
+      "type": "sub_graph",
+      "label": "\ud83d\udd04ProjectAnalyzer[d=1]",
+      "timestamp": 1769845385.2249348,
+      "metadata": {},
+      "data": {
+        "type": "sub_graph",
+        "tool_name": "ProjectAnalyzer",
+        "tool_use_id": "subagent_587ec89a7262",
+        "system_prompt": "You are a project analyst that coordinates comprehensive code analysis.\n\nYou have access to two specialized tools:\n1. SecurityAudit - For security vulnerability analysis\n2. DocSummary - For documentation and code structure analysis\n\nIMPORTANT: When asked to analyze a file, you MUST use BOTH tools in a SINGLE response\n(parallel tool calls). Do NOT call them sequentially.\n\nAfter receiving results from both tools, provide a brief combined analysis.",
+        "nodes": {
+          "cb5d27522398": {
+            "id": "cb5d27522398",
+            "parent_ids": [],
+            "data": {
+              "type": "system_prompt",
+              "content": "You are a project analyst that coordinates comprehensive code analysis.\n\nYou have access to two specialized tools:\n1. SecurityAudit - For security vulnerability analysis\n2. DocSummary - For documentation and code structure analysis\n\nIMPORTANT: When asked to analyze a file, you MUST use BOTH tools in a SINGLE response\n(parallel tool calls). Do NOT call them sequentially.\n\nAfter receiving results from both tools, provide a brief combined analysis."
+            },
+            "timestamp": 1769845348.03918,
+            "metadata": {}
+          },
+          "f13774d345ac": {
+            "id": "f13774d345ac",
+            "parent_ids": [
+              "cb5d27522398"
+            ],
+            "data": {
+              "type": "tool_definitions",
+              "tools": [
+                {
+                  "name": "SecurityAudit",
+                  "description": "Spawn a sub-agent to audit code for security vulnerabilities",
+                  "input_schema": {
+                    "type": "object",
+                    "properties": {
+                      "file_path": {
+                        "type": "string",
+                        "description": "Path to the file to audit for security issues"
+                      }
+                    },
+                    "required": [
+                      "file_path"
+                    ],
+                    "additionalProperties": false
+                  }
+                },
+                {
+                  "name": "DocSummary",
+                  "description": "Spawn a sub-agent to summarize code documentation and comments",
+                  "input_schema": {
+                    "type": "object",
+                    "properties": {
+                      "file_path": {
+                        "type": "string",
+                        "description": "Path to the file to summarize documentation for"
+                      }
+                    },
+                    "required": [
+                      "file_path"
+                    ],
+                    "additionalProperties": false
+                  }
+                }
+              ]
+            },
+            "timestamp": 1769845348.039191,
+            "metadata": {}
+          },
+          "7bfd9628525a": {
+            "id": "7bfd9628525a",
+            "parent_ids": [
+              "f13774d345ac"
+            ],
+            "data": {
+              "role": "user",
+              "content": "Analyze examples/hello_world.py. Use BOTH the SecurityAudit and DocSummary tools."
+            },
+            "timestamp": 1769845348.0391989,
+            "metadata": {}
+          },
+          "34ce178615ec": {
+            "id": "34ce178615ec",
+            "parent_ids": [
+              "7bfd9628525a"
+            ],
+            "data": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "thinking",
+                  "thinking": "The user wants me to analyze the file examples/hello_world.py using both the SecurityAudit and DocSummary tools. Since these two tools are independent of each other, I should call them in parallel in a single response.",
+                  "signature": "EoMDCkYICxgCKkBYvN49yflAPQq2ez/ScmfRmkQ9Rut9cldcTjoKnZQMFabnxtX9mBLlzwPiDLT3zI+hQtFzX2Kd3B3SmpDvBTvdEgwPK0tnxuSWjeW8q5MaDMhYEUbweV9j1xNOJiIwKbDZcCAM2yWLHi+ucrbkhsw5enEKaqhwYK1mLf3ZW1zqowf7Zu9iAMPLSw9z5Wz0KuoBhBA41jy2Mn5K3jKDqVDSIeHuuvyzcLRo9r/UwfLCMP5tQ12G9X96TbUKb7i4i0RGnu+mzOUT6qrGHGltRlQraa0x8DzLemzdnvFlTQpcFplWqhZJ15AryKK+crQZ5sVOYSgWOh1PD5KOYajNoBJslU2MkrQMwTBoLWHVmGHtP9Dg9scAFSygzatYVfsdX6X1IACAcDcU7MGLbjrAjf6+9veKt/70I7QAQhI0TdIvUnb0NWaGhCHyuH9As8howHLd/GlDrEEdPAUTF9HzC2F6gkALuiEoTBnIHnqaVJePY0sROeG8x4bafr5lGAE="
+                },
+                {
+                  "type": "text",
+                  "text": "I'll analyze the file using both tools in parallel."
+                },
+                {
+                  "type": "tool_use",
+                  "id": "toolu_01L5wv6UGp72vB6ZaTwpuRqN",
+                  "name": "SecurityAudit",
+                  "input": {
+                    "file_path": "examples/hello_world.py"
+                  }
+                },
+                {
+                  "type": "tool_use",
+                  "id": "toolu_01JxyjJ6HWRJ982zhcGLs4Gr",
+                  "name": "DocSummary",
+                  "input": {
+                    "file_path": "examples/hello_world.py"
+                  }
+                }
+              ]
+            },
+            "timestamp": 1769845351.840905,
+            "metadata": {}
+          },
+          "b936f5ab305b": {
+            "id": "b936f5ab305b",
+            "parent_ids": [
+              "34ce178615ec"
+            ],
+            "data": {
+              "type": "sub_graph",
+              "tool_name": "SecurityAuditor",
+              "tool_use_id": "subagent_5bfb0f3e28a1",
+              "system_prompt": "You are an expert security auditor. Your task is to analyze code\nfor potential security vulnerabilities.\n\nLook for:\n- Input validation issues\n- Injection vulnerabilities (SQL, command, etc.)\n- Authentication/authorization flaws\n- Sensitive data exposure\n- Insecure dependencies or practices\n\nUse the Read tool to examine the file, then provide a concise security assessment.",
+              "nodes": {
+                "7efbad551b85": {
+                  "id": "7efbad551b85",
+                  "parent_ids": [],
+                  "data": {
+                    "type": "system_prompt",
+                    "content": "You are an expert security auditor. Your task is to analyze code\nfor potential security vulnerabilities.\n\nLook for:\n- Input validation issues\n- Injection vulnerabilities (SQL, command, etc.)\n- Authentication/authorization flaws\n- Sensitive data exposure\n- Insecure dependencies or practices\n\nUse the Read tool to examine the file, then provide a concise security assessment."
+                  },
+                  "timestamp": 1769845351.841035,
+                  "metadata": {}
+                },
+                "7a97a3a2ea2d": {
+                  "id": "7a97a3a2ea2d",
+                  "parent_ids": [
+                    "7efbad551b85"
+                  ],
+                  "data": {
+                    "type": "tool_definitions",
+                    "tools": [
+                      {
+                        "name": "Read",
+                        "description": "Reads a file from the local filesystem.\n\nUsage:\n- The file_path parameter must be an absolute path, not a relative path\n- Maximum 25 lines per read (use offset to paginate through larger files)\n- Output includes metadata: file path, size, total lines, range shown\n\nWorkflow for large files:\n1. First read without offset to see file overview and metadata\n2. Use Grep to find relevant line numbers for specific patterns\n3. Use offset to read focused sections (e.g., offset=100 reads lines 101-125)\n\nExamples:\n  ReadInput(file_path=\"/path/to/file.py\")              # Lines 1-25\n  ReadInput(file_path=\"/path/to/file.py\", offset=100)  # Lines 101-125\n  ReadInput(file_path=\"/path/to/file.py\", offset=50, limit=10)  # Lines 51-60\n\nNote: For binary files (images, PDFs), content is processed differently.",
+                        "input_schema": {
+                          "type": "object",
+                          "properties": {
+                            "file_path": {
+                              "type": "string",
+                              "description": "The absolute path to the file to read"
+                            },
+                            "offset": {
+                              "type": "integer",
+                              "description": "The line number to start reading from"
+                            },
+                            "limit": {
+                              "type": "integer",
+                              "description": "The number of lines to read"
+                            }
+                          },
+                          "required": [
+                            "file_path"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    ]
+                  },
+                  "timestamp": 1769845351.841044,
+                  "metadata": {}
+                },
+                "b76cbc4adbbf": {
+                  "id": "b76cbc4adbbf",
+                  "parent_ids": [
+                    "7a97a3a2ea2d"
+                  ],
+                  "data": {
+                    "role": "user",
+                    "content": "Perform a security audit on: examples/hello_world.py"
+                  },
+                  "timestamp": 1769845351.8410501,
+                  "metadata": {}
+                },
+                "514809c2245c": {
+                  "id": "514809c2245c",
+                  "parent_ids": [
+                    "b76cbc4adbbf"
+                  ],
+                  "data": {
+                    "role": "assistant",
+                    "content": [
+                      {
+                        "type": "thinking",
+                        "thinking": "The user wants me to perform a security audit on a specific file. Let me read the file first to examine its contents.",
+                        "signature": "Ep4CCkYICxgCKkCVR7Rlr+Rxy+YN7ymTtj8r7lf8UqvYloL9g0qWkXoOPqeqgDi/LnB1JDZHg2IDRPcvl+d+93UTTW/Xd92zJpGDEgzpaIN2fpwDg19EFAMaDNHk2hjtNjBrnAh/hiIw+9YcioSVnt3YPOXu9uyGPXORHbQYDC2jRlVLAkhGpRB4EK07FN5g/u8unSYu1yx0KoUBYdLJjNIHKRmfLSTPhukGKr5gTvaQcI85FN6y77ZCkcinjOqQfCCdXl+G2eHl0ifOb5OlepWphEDXDH2bxhplkJ+z2QST2aJ+NxKvgLPWwi26NFpF9oxvETV9n5wWIkfiEURGd9VPZLHfI9pZmVBTQFcZX9SsV9x8fER0UW1AC1WNK9XEBxgB"
+                      },
+                      {
+                        "type": "tool_use",
+                        "id": "toolu_01Fkt1R2ssiEgyhRtaZEyUn7",
+                        "name": "Read",
+                        "input": {
+                          "file_path": "/Users/tanthong/nano-agent/examples/hello_world.py"
+                        }
+                      }
+                    ]
+                  },
+                  "timestamp": 1769845354.450138,
+                  "metadata": {}
+                },
+                "1a8efeeeee34": {
+                  "id": "1a8efeeeee34",
+                  "parent_ids": [
+                    "514809c2245c"
+                  ],
+                  "data": {
+                    "type": "tool_execution",
+                    "tool_name": "Read",
+                    "tool_use_id": "toolu_01Fkt1R2ssiEgyhRtaZEyUn7",
+                    "result": [
+                      {
+                        "type": "text",
+                        "text": "Size: 406 B | Lines: 19 | Showing: 1-19\n     1\t\"\"\"Hello World: Simplest possible DAG example.\"\"\"\n     2\t\n     3\timport asyncio\n     4\t\n     5\tfrom nano_agent import DAG, ClaudeAPI\n     6\t\n     7\t\n     8\tasync def main() -> None:\n     9\t    dag = (\n    10\t        DAG().system(\"You are a friendly assistant.\").user(\"Hello! What is your name?\")\n    11\t    )\n    12\t    api = ClaudeAPI()\n    13\t    response = await api.send(dag)\n    14\t    dag = dag.assistant(response.content)\n    15\t    print(dag)\n    16\t\n    17\t\n    18\tif __name__ == \"__main__\":\n    19\t    asyncio.run(main())"
+                      }
+                    ],
+                    "is_error": false
+                  },
+                  "timestamp": 1769845354.450578,
+                  "metadata": {}
+                },
+                "ae9cf08ad506": {
+                  "id": "ae9cf08ad506",
+                  "parent_ids": [
+                    "1a8efeeeee34"
+                  ],
+                  "data": {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_01Fkt1R2ssiEgyhRtaZEyUn7",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Size: 406 B | Lines: 19 | Showing: 1-19\n     1\t\"\"\"Hello World: Simplest possible DAG example.\"\"\"\n     2\t\n     3\timport asyncio\n     4\t\n     5\tfrom nano_agent import DAG, ClaudeAPI\n     6\t\n     7\t\n     8\tasync def main() -> None:\n     9\t    dag = (\n    10\t        DAG().system(\"You are a friendly assistant.\").user(\"Hello! What is your name?\")\n    11\t    )\n    12\t    api = ClaudeAPI()\n    13\t    response = await api.send(dag)\n    14\t    dag = dag.assistant(response.content)\n    15\t    print(dag)\n    16\t\n    17\t\n    18\tif __name__ == \"__main__\":\n    19\t    asyncio.run(main())"
+                          }
+                        ],
+                        "is_error": false
+                      }
+                    ]
+                  },
+                  "timestamp": 1769845354.450589,
+                  "metadata": {}
+                },
+                "f5a543b7ed72": {
+                  "id": "f5a543b7ed72",
+                  "parent_ids": [
+                    "ae9cf08ad506"
+                  ],
+                  "data": {
+                    "role": "assistant",
+                    "content": [
+                      {
+                        "type": "thinking",
+                        "thinking": "Let me analyze this file for security vulnerabilities. This is a simple example file that:\n\n1. Imports asyncio and modules from nano_agent\n2. Creates a DAG with a system prompt and user message\n3. Creates a ClaudeAPI instance\n4. Sends the DAG to the API and gets a response\n5. Appends the response to the DAG and prints it\n\nLet me assess the security aspects:\n\n1. **Input validation**: There's no external user input in this example - all strings are hardcoded.\n\n2. **Injection vulnerabilities**: No SQL, command injection, or similar issues since there's no dynamic input being processed.\n\n3. **Authentication/authorization**: The ClaudeAPI() is instantiated without visible credentials. This likely means it reads from environment variables or a config file (which is the proper practice for API keys).\n\n4. **Sensitive data exposure**: No sensitive data is hardcoded in this file. The API key handling is delegated to the ClaudeAPI class.\n\n5. **Insecure dependencies**: The imports are from standard library (asyncio) and the project's own nano_agent module.\n\nThis is a minimal example file with no significant security concerns. It's essentially a \"hello world\" demonstration that doesn't handle external input or sensitive operations.",
+                        "signature": "Ev8KCkYICxgCKkCpf7MHox3bpx9Qd/VT/4QG+f+QI7gJYTfIrOfiQAw8TFr0KW+ClF+TOx3z41jlTFOoTrjLrGtMelVHpTlOUHxAEgw2MRzj4i1sCV44JfkaDJwD9465PqgF4B+6OiIwT53FDEtF8lxh17r+WBwsJsdXrLiDY14dURqhuDeWVB/qwy7XT+mGKwkpJ+QznVcUKuYJpaX/ULlSScytytmuIAdoxfVbFnmaEVWfMMVLNmMPTB+L7GGtsirVBX8QXpSuEqvpKWjUkAOCttF2DyWbRSTfpPJ0bvNBSk4I9gdJtkLoCpjTtWj+Zb5PBdDgewoKjnT7tZquZjy1F0gGHMawa/bUAQDg6M88gUeWTLIx74m4of19pXwobP0wNix3b7lNpQrOTDqTFtZcg3zAIndjzIQ6q8FwtUoUJSl1croX8iJOAAOdmF0kNlpGUMgUv7FLIp5on97EurYHWXym2BfTH6WGCCT4k6CNqTyjNxkL54gXuBrudeZfDqhOLxPjWvEv7t33l3vlHgQ+53DRsS35xeNp6SQqG8DAWZLUJ7T1YX7NrlTEepCX8DtUDlqVKCUgvn6NiD14+vV6v23xYxJ/glZirLtRa4KCJbVKhqcLdGXurnEJZdNxVPytH04XrDqX52WjXIhBoM0tfY8/Bdtfo+Lal1EaycpKFJsrlEqUeCsTbxe73LZXuso1O94SVvdqGJ1ZX1YJFV2eo88hijXR0gaKzUt8PT0onhuPupaxxl6pom9Bf85O5OojpySQlqoZLKPe+4dzxTdZU736/CNou3GwlBUe5HnZdDafi5URXhf+oXKIoQnwKXnA+1UrjJtfYTqRusDiPKm2hDuFm+gCZ59or/HYZ4rm4XJwCq6uFb5J4l9dDVdnkwz+CP25XQiO307lSLF+8q3ehM9ms/WxDhMN5pTkASp9xlMuOGoyGfzGGfM5HhXpMS9p2EstL79XJvxEJR0VS1ZJ+tjAxJNOAKy56GPlh8LxeRdkhYLNbNrR3E+u6n6Ub3ZHm9rnPcJLE3pnmyWShI2Oal1ZNl3wgF197LGlNzteW9c1oYD1K02ZihJUHHQ4pkO2L6LT7XGpXD0Za7NfdzIvHDHkPh6il2YFfHO+jyqpgrSULhLTd67Jj+NyQYdZfwdWVuSnEAxz2xIrGDdGx6FX3n3nezpo8DSMpLnByuTp5h15j902QfwoiJortqyo9JTWC4GeI0fi6msdH0b8iwxD4BE/varEcc+gZxC6Jtu+yeFDwb1x7t+FFS99b92hbL3ZnQUyqX4L4wgOqpahPC0a8dX8OKpRM13LMGHXVLC0ZkqT8kznZ+RCphu1avMsw/RE7QCfYreo1QkgYcy6jpuSaSypvYd4w6HZwWUuZfpRheqSMhAjoHQfiay2vD8NV7NKMBajlWgSC7ZkfenkyoerqAg5jLB24d1ZB/h/0KvhlerY2vQO6eMuDZM/yfdNmpjWZvRVtnrqn77GEkIgMR+nOTWcdGP01wOasFDe9hfaJUQRLg3Dl9VBcRAdvszYG9Q0F+KD5QLUgNEYkFHCVAD/el8Ed97qFgN2GeDFqjqj3mA4VLzGrK2W4FwvtsjAcoQIH+Jaqfyw6dfYZeNNzpS7FpIXbTrxSmHfkFJqIdLGmK9LAw2Du/7I18Psj/g3a9GPGzGWjituNCNSU2UUAQN2HaCXRRLq085Zv1VFalQ8ZI06YVuiPrhIVMJrDNjZCnXG0AU/Omif66jx2PrXUKFenjCIPSWTIIg7ofiqSiJegsq/Uu71lJE81YXfXQ2YEHrKAbY4Z+KihKMoj+M3TT94mluQf8Z5N6sEXCgUXRAneHgY6v3SAcq/G5aS6k1DmUPlASdjphLas85G/2Z6yMyvGAE="
+                      },
+                      {
+                        "type": "text",
+                        "text": "## Security Audit: `examples/hello_world.py`\n\n### Summary\n**Risk Level: Low** - This is a minimal example with no significant security vulnerabilities.\n\n### Analysis\n\n| Category | Status | Notes |\n|----------|--------|-------|\n| Input Validation | \u2705 N/A | No external user input; all strings are hardcoded |\n| Injection Vulnerabilities | \u2705 None | No dynamic input processing |\n| Authentication | \u2705 OK | API credentials handled by `ClaudeAPI` class (not hardcoded) |\n| Sensitive Data Exposure | \u2705 None | No secrets or sensitive data in file |\n| Insecure Dependencies | \u2705 None | Uses only stdlib and project modules |\n\n### Observations\n\n1. **Credential Handling**: The `ClaudeAPI()` is instantiated without explicit credentials, which is correct practice. API keys are presumably loaded from environment variables or a config file by the underlying class.\n\n2. **No External Input**: All data (`system`, `user` prompts) is hardcoded, eliminating prompt injection risks in this example.\n\n3. **Output Handling**: The `print(dag)` statement outputs the conversation to stdout. In a production context, care should be taken if API responses could contain sensitive data, but for this example it's appropriate.\n\n### Recommendations\n\nNone required for this example file. This is a straightforward demonstration with no security concerns."
+                      }
+                    ]
+                  },
+                  "timestamp": 1769845369.3953679,
+                  "metadata": {}
+                },
+                "3d0dbf6b3d0e": {
+                  "id": "3d0dbf6b3d0e",
+                  "parent_ids": [
+                    "f5a543b7ed72"
+                  ],
+                  "data": {
+                    "type": "stop_reason",
+                    "reason": "end_turn",
+                    "usage": {
+                      "input_tokens": 8770,
+                      "output_tokens": 723,
+                      "cache_creation_input_tokens": 0,
+                      "cache_read_input_tokens": 0
+                    }
+                  },
+                  "timestamp": 1769845369.3953788,
+                  "metadata": {}
+                }
+              },
+              "head_ids": [
+                "3d0dbf6b3d0e"
+              ],
+              "summary": "## Security Audit: `examples/hello_world.py`\n\n### Summary\n**Risk Level: Low** - This is a minimal example with no significant security vulnerabilities.\n\n### Analysis\n\n| Category | Status | Notes |\n|----------|--------|-------|\n| Input Validation | \u2705 N/A | No external user input; all strings are hardcoded |\n| Injection Vulnerabilities | \u2705 None | No dynamic input processing |\n| Authentication | \u2705 OK | API credentials handled by `ClaudeAPI` class (not hardcoded) |\n| Sensitive Data Exposure | \u2705 None...",
+              "depth": 2
+            },
+            "timestamp": 1769845369.395434,
+            "metadata": {}
+          },
+          "0f5bc1d5a9b1": {
+            "id": "0f5bc1d5a9b1",
+            "parent_ids": [
+              "b936f5ab305b"
+            ],
+            "data": {
+              "type": "tool_execution",
+              "tool_name": "SecurityAudit",
+              "tool_use_id": "toolu_01L5wv6UGp72vB6ZaTwpuRqN",
+              "result": [
+                {
+                  "type": "text",
+                  "text": "Security Audit Complete\nFile: examples/hello_world.py\n---\n## Security Audit: `examples/hello_world.py`\n\n### Summary\n**Risk Level: Low** - This is a minimal example with no significant security vulnerabilities.\n\n### Analysis\n\n| Category | Status | Notes |\n|----------|--------|-------|\n| Input Validation | \u2705 N/A | No external user input; all strings are hardcoded |\n| Injection Vulnerabilities | \u2705 None | No dynamic input processing |\n| Authentication | \u2705 OK | API credentials handled by `ClaudeAPI` class (not hardcoded) |\n| Sensitive Data Exposure | \u2705 None..."
+                }
+              ],
+              "is_error": false
+            },
+            "timestamp": 1769845369.39544,
+            "metadata": {}
+          },
+          "540d459cc672": {
+            "id": "540d459cc672",
+            "parent_ids": [
+              "34ce178615ec"
+            ],
+            "data": {
+              "type": "sub_graph",
+              "tool_name": "DocSummarizer",
+              "tool_use_id": "subagent_95b66d3f39a5",
+              "system_prompt": "You are an expert technical writer. Your task is to summarize\nthe documentation and comments in code files.\n\nProvide:\n- Overview of what the code does\n- Summary of docstrings and comments\n- Description of key functions/classes\n- Any usage examples found in the code\n\nUse the Read tool to examine the file, then provide a concise documentation summary.",
+              "nodes": {
+                "d10fea8f2315": {
+                  "id": "d10fea8f2315",
+                  "parent_ids": [],
+                  "data": {
+                    "type": "system_prompt",
+                    "content": "You are an expert technical writer. Your task is to summarize\nthe documentation and comments in code files.\n\nProvide:\n- Overview of what the code does\n- Summary of docstrings and comments\n- Description of key functions/classes\n- Any usage examples found in the code\n\nUse the Read tool to examine the file, then provide a concise documentation summary."
+                  },
+                  "timestamp": 1769845369.3955562,
+                  "metadata": {}
+                },
+                "a0ecac93c20e": {
+                  "id": "a0ecac93c20e",
+                  "parent_ids": [
+                    "d10fea8f2315"
+                  ],
+                  "data": {
+                    "type": "tool_definitions",
+                    "tools": [
+                      {
+                        "name": "Read",
+                        "description": "Reads a file from the local filesystem.\n\nUsage:\n- The file_path parameter must be an absolute path, not a relative path\n- Maximum 25 lines per read (use offset to paginate through larger files)\n- Output includes metadata: file path, size, total lines, range shown\n\nWorkflow for large files:\n1. First read without offset to see file overview and metadata\n2. Use Grep to find relevant line numbers for specific patterns\n3. Use offset to read focused sections (e.g., offset=100 reads lines 101-125)\n\nExamples:\n  ReadInput(file_path=\"/path/to/file.py\")              # Lines 1-25\n  ReadInput(file_path=\"/path/to/file.py\", offset=100)  # Lines 101-125\n  ReadInput(file_path=\"/path/to/file.py\", offset=50, limit=10)  # Lines 51-60\n\nNote: For binary files (images, PDFs), content is processed differently.",
+                        "input_schema": {
+                          "type": "object",
+                          "properties": {
+                            "file_path": {
+                              "type": "string",
+                              "description": "The absolute path to the file to read"
+                            },
+                            "offset": {
+                              "type": "integer",
+                              "description": "The line number to start reading from"
+                            },
+                            "limit": {
+                              "type": "integer",
+                              "description": "The number of lines to read"
+                            }
+                          },
+                          "required": [
+                            "file_path"
+                          ],
+                          "additionalProperties": false
+                        }
+                      }
+                    ]
+                  },
+                  "timestamp": 1769845369.395564,
+                  "metadata": {}
+                },
+                "e4a507dd0c0c": {
+                  "id": "e4a507dd0c0c",
+                  "parent_ids": [
+                    "a0ecac93c20e"
+                  ],
+                  "data": {
+                    "role": "user",
+                    "content": "Summarize the documentation in: examples/hello_world.py"
+                  },
+                  "timestamp": 1769845369.3955688,
+                  "metadata": {}
+                },
+                "563384f12c68": {
+                  "id": "563384f12c68",
+                  "parent_ids": [
+                    "e4a507dd0c0c"
+                  ],
+                  "data": {
+                    "role": "assistant",
+                    "content": [
+                      {
+                        "type": "thinking",
+                        "thinking": "The user wants me to summarize the documentation in examples/hello_world.py. Let me read that file first.",
+                        "signature": "EpECCkYICxgCKkCxI0SERrXV2cdzovd5MWPvs98TmPIo1CD2z+q3kjfo1xtEEkG7WR50cMfcOOdIRRPA2K3iTentkMRiIuSAM6rzEgwMmIES77vWDZxOj58aDGopKl8pmyBhJj/R4CIwiJmQHSjFWLO71+rVY5bPmYkg517VLwGXlmHbi1ZJ35VGdJn7S1k5TgAO9EHQs1S+KnlEPDT7aYCuV8gqTkenyGHSA127aYE5hkQnlldHY4WBkPNwTYZDsuAeVtw7WdNglFtwDUHO8dgJIrzWKWo+WxWMYSdmCUwYk+e3RAK2h27pfd1SsdfAvRXo+JsuodJp/qx+b+n7tUy5AX1i0WU+WNlqaJQwSAnojwR/GAE="
+                      },
+                      {
+                        "type": "tool_use",
+                        "id": "toolu_01PU8bGQ22crdQUVdguSKeLW",
+                        "name": "Read",
+                        "input": {
+                          "file_path": "/Users/tanthong/nano-agent/examples/hello_world.py"
+                        }
+                      }
+                    ]
+                  },
+                  "timestamp": 1769845372.116288,
+                  "metadata": {}
+                },
+                "d058c2a6aea8": {
+                  "id": "d058c2a6aea8",
+                  "parent_ids": [
+                    "563384f12c68"
+                  ],
+                  "data": {
+                    "type": "tool_execution",
+                    "tool_name": "Read",
+                    "tool_use_id": "toolu_01PU8bGQ22crdQUVdguSKeLW",
+                    "result": [
+                      {
+                        "type": "text",
+                        "text": "Size: 406 B | Lines: 19 | Showing: 1-19\n     1\t\"\"\"Hello World: Simplest possible DAG example.\"\"\"\n     2\t\n     3\timport asyncio\n     4\t\n     5\tfrom nano_agent import DAG, ClaudeAPI\n     6\t\n     7\t\n     8\tasync def main() -> None:\n     9\t    dag = (\n    10\t        DAG().system(\"You are a friendly assistant.\").user(\"Hello! What is your name?\")\n    11\t    )\n    12\t    api = ClaudeAPI()\n    13\t    response = await api.send(dag)\n    14\t    dag = dag.assistant(response.content)\n    15\t    print(dag)\n    16\t\n    17\t\n    18\tif __name__ == \"__main__\":\n    19\t    asyncio.run(main())"
+                      }
+                    ],
+                    "is_error": false
+                  },
+                  "timestamp": 1769845372.116661,
+                  "metadata": {}
+                },
+                "4b7bafd83c83": {
+                  "id": "4b7bafd83c83",
+                  "parent_ids": [
+                    "d058c2a6aea8"
+                  ],
+                  "data": {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "tool_result",
+                        "tool_use_id": "toolu_01PU8bGQ22crdQUVdguSKeLW",
+                        "content": [
+                          {
+                            "type": "text",
+                            "text": "Size: 406 B | Lines: 19 | Showing: 1-19\n     1\t\"\"\"Hello World: Simplest possible DAG example.\"\"\"\n     2\t\n     3\timport asyncio\n     4\t\n     5\tfrom nano_agent import DAG, ClaudeAPI\n     6\t\n     7\t\n     8\tasync def main() -> None:\n     9\t    dag = (\n    10\t        DAG().system(\"You are a friendly assistant.\").user(\"Hello! What is your name?\")\n    11\t    )\n    12\t    api = ClaudeAPI()\n    13\t    response = await api.send(dag)\n    14\t    dag = dag.assistant(response.content)\n    15\t    print(dag)\n    16\t\n    17\t\n    18\tif __name__ == \"__main__\":\n    19\t    asyncio.run(main())"
+                          }
+                        ],
+                        "is_error": false
+                      }
+                    ]
+                  },
+                  "timestamp": 1769845372.11667,
+                  "metadata": {}
+                },
+                "a79ee31ab743": {
+                  "id": "a79ee31ab743",
+                  "parent_ids": [
+                    "4b7bafd83c83"
+                  ],
+                  "data": {
+                    "role": "assistant",
+                    "content": [
+                      {
+                        "type": "thinking",
+                        "thinking": "This is a simple example file. Let me summarize the documentation and code.",
+                        "signature": "EvMBCkYICxgCKkBFphk9RYnSNoHzXbG3XxVn/pZ+So7xV8l6CBmW4WaodzXp9zK2Q4s2Ge5Mii78+qkCEP1N5u1nqFg0E1Krm/AcEgyKxacEtn2lCWXnPe0aDJdKL5cYa6NVHbyJRCIwwlgfnO6AlgzH8jKXsDpeg8sfAoO5QVHfJx8ahhP/EZ/+uQisJoT2oG3v8bfDDEsuKltkmEzNw3L7H1TJnKVagho5ai63uK4E51H0y4d8JE6bizj6e10FcfJ7U2Q6iWX3OUyO6ANz9DUI3+1BOvFo0B2adc+zl5XM5mMbVG/4p8If9lrZEQSp/D6+wTrlGAE="
+                      },
+                      {
+                        "type": "text",
+                        "text": "## Documentation Summary: `examples/hello_world.py`\n\n### Overview\nA minimal example demonstrating basic usage of the nano-agent library to create a simple conversational DAG (Directed Acyclic Graph) and interact with the Claude API.\n\n### Docstring\n```\nHello World: Simplest possible DAG example.\n```\n\n### Key Components\n\n| Component | Description |\n|-----------|-------------|\n| `DAG` | Core class for building conversation flows with chained `.system()`, `.user()`, and `.assistant()` methods |\n| `ClaudeAPI` | API client for sending DAG requests to Claude |\n\n### Code Flow\n1. Creates a DAG with a system prompt (\"You are a friendly assistant\") and a user message\n2. Instantiates the `ClaudeAPI` client\n3. Sends the DAG to the API and awaits the response\n4. Appends the assistant's response to the DAG\n5. Prints the complete conversation DAG\n\n### Usage Pattern\nThis example demonstrates the fluent/builder pattern for constructing conversations:\n```python\ndag = DAG().system(\"...\").user(\"...\")\nresponse = await api.send(dag)\ndag = dag.assistant(response.content)\n```"
+                      }
+                    ]
+                  },
+                  "timestamp": 1769845379.194431,
+                  "metadata": {}
+                },
+                "8fc670e75af3": {
+                  "id": "8fc670e75af3",
+                  "parent_ids": [
+                    "a79ee31ab743"
+                  ],
+                  "data": {
+                    "type": "stop_reason",
+                    "reason": "end_turn",
+                    "usage": {
+                      "input_tokens": 8760,
+                      "output_tokens": 410,
+                      "cache_creation_input_tokens": 0,
+                      "cache_read_input_tokens": 0
+                    }
+                  },
+                  "timestamp": 1769845379.194446,
+                  "metadata": {}
+                }
+              },
+              "head_ids": [
+                "8fc670e75af3"
+              ],
+              "summary": "## Documentation Summary: `examples/hello_world.py`\n\n### Overview\nA minimal example demonstrating basic usage of the nano-agent library to create a simple conversational DAG (Directed Acyclic Graph) and interact with the Claude API.\n\n### Docstring\n```\nHello World: Simplest possible DAG example.\n```\n\n### Key Components\n\n| Component | Description |\n|-----------|-------------|\n| `DAG` | Core class for building conversation flows with chained `.system()`, `.user()`, and `.assistant()` methods |\n| `C...",
+              "depth": 2
+            },
+            "timestamp": 1769845379.194505,
+            "metadata": {}
+          },
+          "1e05040f56ca": {
+            "id": "1e05040f56ca",
+            "parent_ids": [
+              "540d459cc672"
+            ],
+            "data": {
+              "type": "tool_execution",
+              "tool_name": "DocSummary",
+              "tool_use_id": "toolu_01JxyjJ6HWRJ982zhcGLs4Gr",
+              "result": [
+                {
+                  "type": "text",
+                  "text": "Documentation Summary Complete\nFile: examples/hello_world.py\n---\n## Documentation Summary: `examples/hello_world.py`\n\n### Overview\nA minimal example demonstrating basic usage of the nano-agent library to create a simple conversational DAG (Directed Acyclic Graph) and interact with the Claude API.\n\n### Docstring\n```\nHello World: Simplest possible DAG example.\n```\n\n### Key Components\n\n| Component | Description |\n|-----------|-------------|\n| `DAG` | Core class for building conversation flows with chained `.system()`, `.user()`, and `.assistant()` methods |\n| `C..."
+                }
+              ],
+              "is_error": false
+            },
+            "timestamp": 1769845379.194515,
+            "metadata": {}
+          },
+          "781f4ae34b31": {
+            "id": "781f4ae34b31",
+            "parent_ids": [
+              "0f5bc1d5a9b1",
+              "1e05040f56ca"
+            ],
+            "data": {
+              "role": "user",
+              "content": [
+                {
+                  "type": "tool_result",
+                  "tool_use_id": "toolu_01L5wv6UGp72vB6ZaTwpuRqN",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Security Audit Complete\nFile: examples/hello_world.py\n---\n## Security Audit: `examples/hello_world.py`\n\n### Summary\n**Risk Level: Low** - This is a minimal example with no significant security vulnerabilities.\n\n### Analysis\n\n| Category | Status | Notes |\n|----------|--------|-------|\n| Input Validation | \u2705 N/A | No external user input; all strings are hardcoded |\n| Injection Vulnerabilities | \u2705 None | No dynamic input processing |\n| Authentication | \u2705 OK | API credentials handled by `ClaudeAPI` class (not hardcoded) |\n| Sensitive Data Exposure | \u2705 None..."
+                    }
+                  ],
+                  "is_error": false
+                },
+                {
+                  "type": "tool_result",
+                  "tool_use_id": "toolu_01JxyjJ6HWRJ982zhcGLs4Gr",
+                  "content": [
+                    {
+                      "type": "text",
+                      "text": "Documentation Summary Complete\nFile: examples/hello_world.py\n---\n## Documentation Summary: `examples/hello_world.py`\n\n### Overview\nA minimal example demonstrating basic usage of the nano-agent library to create a simple conversational DAG (Directed Acyclic Graph) and interact with the Claude API.\n\n### Docstring\n```\nHello World: Simplest possible DAG example.\n```\n\n### Key Components\n\n| Component | Description |\n|-----------|-------------|\n| `DAG` | Core class for building conversation flows with chained `.system()`, `.user()`, and `.assistant()` methods |\n| `C..."
+                    }
+                  ],
+                  "is_error": false
+                }
+              ]
+            },
+            "timestamp": 1769845379.1945221,
+            "metadata": {}
+          },
+          "24fb814f2964": {
+            "id": "24fb814f2964",
+            "parent_ids": [
+              "781f4ae34b31"
+            ],
+            "data": {
+              "role": "assistant",
+              "content": [
+                {
+                  "type": "thinking",
+                  "thinking": "I've received results from both tools. Let me provide a combined analysis summary for the user.",
+                  "signature": "EocCCkYICxgCKkBTObFVGhrrXC5p4xgbRiRrkwspWI1og8S2/DkZxvdLk6XPnO5u49eKnrfDpfEXfqIVJSve3nF57nlLsLsrytEiEgz76WCUuEosbARPevIaDGkOuaY1Mtz4nWbdziIwbbKigIO8ARsXlTMKpaSN3wpdZ1FJKMfHCjTeUSH51bZ2ShItjCCR9QwXzLooProUKm/XsbgExKCqod10XhuMCyGb/Mn/URFlBil9gSIvzZZA+zhPmTfXZeV5FlHoSs8EfgHNPekMq4x1CZ9+rIyM5R3sYtqAXKuiWvrHXoNNQctHqnVpNTQ5441onp2ymI8fh358oAZ3N5ZlJInzO2E+pfoYAQ=="
+                },
+                {
+                  "type": "text",
+                  "text": "## Combined Analysis: `examples/hello_world.py`\n\n### Security Assessment\n**Risk Level: Low** - This is a minimal example file with no significant security concerns:\n- No external user input or injection risks\n- API credentials are handled by the `ClaudeAPI` class (not hardcoded)\n- No sensitive data exposure\n- All strings are hardcoded constants\n\n### Documentation & Structure\nThis is a minimal \"Hello World\" example demonstrating the nano-agent library:\n- **Purpose**: Shows basic usage of the DAG (Directed Acyclic Graph) pattern for building conversation flows\n- **Key Components**: Uses `DAG` class with chained `.system()`, `.user()`, and `.assistant()` methods, plus `ClaudeAPI` for interacting with the Claude model\n- **Docstring**: \"Hello World: Simplest possible DAG example.\"\n\n### Overall Assessment\nThis file serves its purpose well as an introductory example. It's simple, safe, and clearly documented. No action items or concerns identified."
+                }
+              ]
+            },
+            "timestamp": 1769845385.224853,
+            "metadata": {}
+          },
+          "c85bfe99c719": {
+            "id": "c85bfe99c719",
+            "parent_ids": [
+              "24fb814f2964"
+            ],
+            "data": {
+              "type": "stop_reason",
+              "reason": "end_turn",
+              "usage": {
+                "input_tokens": 8658,
+                "output_tokens": 436,
+                "cache_creation_input_tokens": 0,
+                "cache_read_input_tokens": 0
+              }
+            },
+            "timestamp": 1769845385.224864,
+            "metadata": {}
+          }
+        },
+        "head_ids": [
+          "c85bfe99c719"
+        ],
+        "summary": "## Combined Analysis: `examples/hello_world.py`\n\n### Security Assessment\n**Risk Level: Low** - This is a minimal example file with no significant security concerns:\n- No external user input or injection risks\n- API credentials are handled by the `ClaudeAPI` class (not hardcoded)\n- No sensitive data exposure\n- All strings are hardcoded constants\n\n### Documentation & Structure\nThis is a minimal \"Hello World\" example demonstrating the nano-agent library:\n- **Purpose**: Shows basic usage of the DAG ...",
+        "depth": 1
+      },
+      "parent_count": 1
+    },
+    {
+      "id": "e47e9ea74dc6",
+      "type": "tool_exec",
+      "label": "\u26a1ProjectAnalyzer",
+      "timestamp": 1769845385.22494,
+      "metadata": {},
+      "data": {
+        "type": "tool_execution",
+        "tool_name": "ProjectAnalyzer",
+        "tool_use_id": "toolu_01MaBQFGCt4zcy9cB2XoFk6Y",
+        "result": [
+          {
+            "type": "text",
+            "text": "Project Analysis Complete\nFile: examples/hello_world.py\n---\n## Combined Analysis: `examples/hello_world.py`\n\n### Security Assessment\n**Risk Level: Low** - This is a minimal example file with no significant security concerns:\n- No external user input or injection risks\n- API credentials are handled by the `ClaudeAPI` class (not hardcoded)\n- No sensitive data exposure\n- All strings are hardcoded constants\n\n### Documentation & Structure\nThis is a minimal \"Hello World\" example demonstrating the nano-agent library:\n- **Purpose**: Shows basic usage of the DAG ..."
+          }
+        ],
+        "is_error": false
+      },
+      "parent_count": 1
+    },
+    {
+      "id": "1cc9a3c04154",
+      "type": "message_user",
+      "label": "USER: \u2190result",
+      "timestamp": 1769845385.224947,
+      "metadata": {},
+      "data": {
+        "role": "user",
+        "content": [
+          {
+            "type": "tool_result",
+            "tool_use_id": "toolu_01MaBQFGCt4zcy9cB2XoFk6Y",
+            "content": [
+              {
+                "type": "text",
+                "text": "Project Analysis Complete\nFile: examples/hello_world.py\n---\n## Combined Analysis: `examples/hello_world.py`\n\n### Security Assessment\n**Risk Level: Low** - This is a minimal example file with no significant security concerns:\n- No external user input or injection risks\n- API credentials are handled by the `ClaudeAPI` class (not hardcoded)\n- No sensitive data exposure\n- All strings are hardcoded constants\n\n### Documentation & Structure\nThis is a minimal \"Hello World\" example demonstrating the nano-agent library:\n- **Purpose**: Shows basic usage of the DAG ..."
+              }
+            ],
+            "is_error": false
+          }
+        ]
+      },
+      "parent_count": 1
+    },
+    {
+      "id": "df279434c3bc",
+      "type": "message_assistant",
+      "label": "ASST: \u2190result The analysis",
+      "timestamp": 1769845389.932263,
+      "metadata": {},
+      "data": {
+        "role": "assistant",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "The ProjectAnalyzer tool has completed its analysis of the file. Let me present these results to the user in a clear format.",
+            "signature": "EqUCCkYICxgCKkCMN9awbjjYoJkID7XjE87BSDh6Wxnb/GeOIGvTC/cEOhqxUR1Rlln6MIKAUsRo40xlty3NLob8TjTfVH077BDJEgzEuItvUSfAojUCFGsaDIV6++xTSaL1SX4d4yIw9QBtiUv3mxIFSyEPiaRq3doUrGXjd5IcDQY7BB3N+O2FOBtaeG356LYkZsL1wY7qKowBcncS45iwzVZzT/CNE4vK2hAfXaBrBk1uXYYWMMrmXXKQwUPKzpH6nIAr80NaehvM8E4RpKuJAr6FWWplltEB4gevkE8UWJaUpGiyuBUeQrxAnz7WLzXMWeLlt0/qBz9XYpvldV0Scsnpx+YAVGSkqwq/yhfPUZDGdNjtyWxLh2m9gaSAe+kP+xnTp9sYAQ=="
+          },
+          {
+            "type": "text",
+            "text": "The analysis of `examples/hello_world.py` is complete.\n\n## Summary\n\n### Security Assessment\n**Risk Level: Low**\n\nThis is a minimal example file with no significant security concerns:\n- No external user input or injection risks\n- API credentials are handled by the `ClaudeAPI` class (not hardcoded)\n- No sensitive data exposure\n- All strings are hardcoded constants\n\n### Documentation & Structure\n\nThis is a minimal \"Hello World\" example demonstrating the nano-agent library:\n- **Purpose**: Shows basic usage of the DAG-based agent execution system\n- **Structure**: Simple demonstration file with hardcoded example prompts\n\nThe file appears to be a straightforward introductory example meant to help users understand how to get started with the nano-agent framework. No security vulnerabilities or documentation issues were identified."
+          }
+        ]
+      },
+      "parent_count": 1
+    },
+    {
+      "id": "6a7d2af918f4",
+      "type": "stop_reason",
+      "label": "\u25c9 end_turn",
+      "timestamp": 1769845389.9322739,
+      "metadata": {},
+      "data": {
+        "type": "stop_reason",
+        "reason": "end_turn",
+        "usage": {
+          "input_tokens": 8078,
+          "output_tokens": 318,
+          "cache_creation_input_tokens": 0,
+          "cache_read_input_tokens": 0
+        }
+      },
+      "parent_count": 1
+    }
+  ],
+  "edges": [
+    {
+      "source": "dcf4efcc07d7",
+      "target": "b856eb587f22"
+    },
+    {
+      "source": "b856eb587f22",
+      "target": "6549c9873f9e"
+    },
+    {
+      "source": "6549c9873f9e",
+      "target": "669ccd4bebbb"
+    },
+    {
+      "source": "669ccd4bebbb",
+      "target": "f9fe4550c594"
+    },
+    {
+      "source": "f9fe4550c594",
+      "target": "e47e9ea74dc6"
+    },
+    {
+      "source": "e47e9ea74dc6",
+      "target": "1cc9a3c04154"
+    },
+    {
+      "source": "1cc9a3c04154",
+      "target": "df279434c3bc"
+    },
+    {
+      "source": "df279434c3bc",
+      "target": "6a7d2af918f4"
+    }
+  ]
+};
+
+// Build tool_use_id -> tool_name mapping from all nodes
+const toolNameMap = {};
+graphData.nodes.forEach(n => {
+  if (n.data && n.data.content && Array.isArray(n.data.content)) {
+    n.data.content.forEach(block => {
+      if (block.type === 'tool_use' && block.id && block.name) {
+        toolNameMap[block.id] = block.name;
+      }
+    });
+  }
+});
+
+const container = document.getElementById('graph');
+const width = container.clientWidth;
+const height = container.clientHeight;
+
+const svg = d3.select('#graph').append('svg');
+const g = svg.append('g');
+
+// Arrow marker
+svg.append('defs').append('marker')
+  .attr('id', 'arrow')
+  .attr('viewBox', '0 -5 10 10')
+  .attr('refX', 8)
+  .attr('refY', 0)
+  .attr('markerWidth', 6)
+  .attr('markerHeight', 6)
+  .attr('orient', 'auto')
+  .append('path')
+  .attr('d', 'M0,-5L10,0L0,5')
+  .attr('class', 'edge-arrow');
+
+// Zoom
+svg.call(d3.zoom().on('zoom', (e) => g.attr('transform', e.transform)));
+
+// Build dagre graph
+const dagreGraph = new dagre.graphlib.Graph();
+dagreGraph.setGraph({ rankdir: 'TB', nodesep: 50, ranksep: 60, marginx: 20, marginy: 20 });
+dagreGraph.setDefaultEdgeLabel(() => ({}));
+
+const nodeWidth = 140, nodeHeight = 40;
+
+// Add nodes
+graphData.nodes.forEach(n => {
+  dagreGraph.setNode(n.id, { width: nodeWidth, height: nodeHeight, data: n });
+});
+
+// Add edges
+graphData.edges.forEach(e => {
+  dagreGraph.setEdge(e.source, e.target);
+});
+
+// Layout
+dagre.layout(dagreGraph);
+
+// Get positions
+const nodeMap = new Map();
+dagreGraph.nodes().forEach(id => {
+  const node = dagreGraph.node(id);
+  node.data.x = node.x;
+  node.data.y = node.y;
+  nodeMap.set(id, node.data);
+});
+
+// Compute bounds and set viewBox
+const xs = graphData.nodes.map(n => n.x);
+const ys = graphData.nodes.map(n => n.y);
+const minX = Math.min(...xs) - nodeWidth;
+const maxX = Math.max(...xs) + nodeWidth;
+const minY = Math.min(...ys) - nodeHeight;
+const maxY = Math.max(...ys) + nodeHeight;
+svg.attr('viewBox', `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
+
+// Draw edges with curves
+const edges = g.selectAll('.edge')
+  .data(graphData.edges)
+  .join('path')
+  .attr('class', 'edge')
+  .attr('marker-end', 'url(#arrow)')
+  .attr('d', d => {
+    const source = nodeMap.get(d.source);
+    const target = nodeMap.get(d.target);
+    const sy = source.y + nodeHeight/2;
+    const ty = target.y - nodeHeight/2;
+    const midY = (sy + ty) / 2;
+    return `M${source.x},${sy} C${source.x},${midY} ${target.x},${midY} ${target.x},${ty}`;
+  });
+
+// Draw nodes
+const nodes = g.selectAll('.node')
+  .data(graphData.nodes)
+  .join('g')
+  .attr('class', d => `node type-${d.type}`)
+  .attr('transform', d => `translate(${d.x - nodeWidth/2},${d.y - nodeHeight/2})`)
+  .on('click', (e, d) => showDetail(d));
+
+nodes.append('rect')
+  .attr('width', nodeWidth)
+  .attr('height', nodeHeight)
+  .attr('rx', 6);
+
+nodes.append('text')
+  .attr('x', nodeWidth / 2)
+  .attr('y', nodeHeight / 2 + 4)
+  .attr('text-anchor', 'middle')
+  .text(d => d.label.length > 18 ? d.label.slice(0, 16) + '...' : d.label);
+
+// Detail panel
+let selected = null;
+
+function showDetail(node) {
+  if (selected) d3.selectAll('.node').classed('selected', false);
+  selected = node;
+  d3.selectAll('.node').classed('selected', d => d.id === node.id);
+
+  const detail = document.getElementById('detail');
+  detail.classList.add('active');
+
+  const content = document.getElementById('detail-content');
+  content.innerHTML = buildDetailHTML(node);
+}
+
+function buildDetailHTML(node) {
+  let html = '';
+
+  html += section('Type', `<div class="value">${node.type}</div>`);
+  html += section('ID', `<div class="value">${node.id}</div>`);
+
+  // Handle different node types
+  if (node.type === 'system_prompt') {
+    html += section('Content', formatSystemPrompt(node.data.content));
+  } else if (node.type === 'message_user') {
+    html += section('Content', formatUserMessage(node.data.content));
+  } else if (node.data.content !== undefined) {
+    html += section('Content', formatContent(node.data.content));
+  }
+
+  // Tool execution node
+  if (node.type === 'tool_exec') {
+    html += section('Tool Execution', formatToolExec(node.data));
+  }
+
+  // SubGraph node
+  if (node.type === 'sub_graph') {
+    const nodeCount = node.data.nodes ? Object.keys(node.data.nodes).length : 0;
+    html += section('Sub-Agent', `
+      <div class="content-block content-tool-exec">
+        <div class="block-label">🔄 ${escapeHtml(node.data.tool_name)} (depth: ${node.data.depth || 0})</div>
+        <div class="block-content">${escapeHtml(node.data.summary || '(no summary)')}</div>
+      </div>
+      ${nodeCount > 0 ? `<button class="zoom-btn" onclick="zoomIntoSubGraph()">🔍 Zoom Into Sub-Agent (${nodeCount} nodes)</button>` : ''}
+    `);
+    if (node.data.system_prompt) {
+      html += section('Sub-Agent System Prompt', `<div class="content-block content-system"><div class="block-content">${escapeHtml(node.data.system_prompt)}</div></div>`);
+    }
+  }
+
+  // Stop reason node
+  if (node.type === 'stop_reason') {
+    html += section('Stop Reason', `<div class="value" style="color: #ff5555; font-weight: bold;">${escapeHtml(node.data.reason)}</div>`);
+    if (node.data.usage) {
+      const u = node.data.usage;
+      const total_input = u.input_tokens || 0;
+      const total_output = u.output_tokens || 0;
+      const cached = u.cache_read_input_tokens || 0;
+      const cache_write = u.cache_creation_input_tokens || 0;
+      html += section('Total Usage', `
+        <div class="value">
+          <div><strong>Input:</strong> ${total_input.toLocaleString()} tokens ${cached > 0 ? `(${cached.toLocaleString()} cached)` : ''}</div>
+          <div><strong>Output:</strong> ${total_output.toLocaleString()} tokens</div>
+          ${cache_write > 0 ? `<div><strong>Cache writes:</strong> ${cache_write.toLocaleString()} tokens</div>` : ''}
+          <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #333;"><strong>Total:</strong> ${(total_input + total_output).toLocaleString()} tokens</div>
+        </div>
+      `);
+    }
+  }
+
+  if (node.data.tools) {
+    const toolsHtml = node.data.tools.map(t => {
+      let itemHtml = `<div class="tool-item">`;
+      itemHtml += `<div class="tool-name">${escapeHtml(t.name)}</div>`;
+      if (t.description) {
+        itemHtml += `<div class="tool-desc">${escapeHtml(t.description)}</div>`;
+      }
+      if (t.input_schema) {
+        itemHtml += `<div class="tool-schema"><span class="schema-label">Input Schema:</span><pre>${escapeHtml(JSON.stringify(t.input_schema, null, 2))}</pre></div>`;
+      }
+      itemHtml += `</div>`;
+      return itemHtml;
+    }).join('');
+    html += section('Tools', `<div class="tools-list">${toolsHtml}</div>`);
+  }
+
+  if (Object.keys(node.metadata).length > 0) {
+    html += section('Metadata', `<pre>${escapeHtml(JSON.stringify(node.metadata, null, 2))}</pre>`);
+  }
+
+  html += section('Raw Data', `<pre>${escapeHtml(JSON.stringify(node.data, null, 2))}</pre>`);
+
+  return html;
+}
+
+function section(title, content) {
+  return `<div class="detail-section"><h4>${title}</h4>${content}</div>`;
+}
+
+function formatSystemPrompt(content) {
+  return `<div class="content-block content-system"><div class="block-label">System Prompt</div><div class="block-content">${escapeHtml(content)}</div></div>`;
+}
+
+function formatUserMessage(content) {
+  if (typeof content === 'string') {
+    return `<div class="content-block content-user"><div class="block-label">User</div><div class="block-content">${escapeHtml(content)}</div></div>`;
+  }
+  // If array (e.g., tool results), format each block
+  if (Array.isArray(content)) {
+    return content.map(block => {
+      if (block.type === 'tool_result') {
+        const toolName = toolNameMap[block.tool_use_id] || '';
+        const label = toolName ? `← ${toolName}` : 'Tool Result';
+        const resultContent = extractText(block.content);
+        return `<div class="content-block content-tool-result"><div class="block-label">${escapeHtml(label)}</div><div class="block-content">${escapeHtml(resultContent)}</div></div>`;
+      }
+      return `<div class="content-block content-user"><div class="block-label">User</div><div class="block-content">${escapeHtml(JSON.stringify(block, null, 2))}</div></div>`;
+    }).join('');
+  }
+  return `<pre>${escapeHtml(JSON.stringify(content, null, 2))}</pre>`;
+}
+
+function formatToolExec(data) {
+  const resultText = extractText(data.result);
+  return `<div class="content-block content-tool-exec">
+    <div class="block-label">⚡ ${escapeHtml(data.tool_name)}</div>
+    <div class="block-content">${escapeHtml(resultText)}</div>
+  </div>`;
+}
+
+function formatContent(content) {
+  if (typeof content === 'string') {
+    return `<div class="content-block content-text"><div class="block-label">Text</div><div class="block-content">${escapeHtml(content)}</div></div>`;
+  }
+  if (Array.isArray(content)) {
+    return content.map(block => {
+      if (block.type === 'text') {
+        return `<div class="content-block content-text"><div class="block-label">Text</div><div class="block-content">${escapeHtml(block.text)}</div></div>`;
+      }
+      if (block.type === 'thinking') {
+        return `<div class="content-block content-thinking"><div class="block-label">Thinking</div><div class="block-content">${escapeHtml(block.thinking)}</div></div>`;
+      }
+      if (block.type === 'tool_use') {
+        return `<div class="content-block content-tool-use"><div class="block-label">Tool: ${escapeHtml(block.name)}</div><pre class="block-content">${escapeHtml(JSON.stringify(block.input, null, 2))}</pre></div>`;
+      }
+      if (block.type === 'tool_result') {
+        const toolName = toolNameMap[block.tool_use_id] || '';
+        const label = toolName ? `← ${toolName}` : 'Tool Result';
+        const resultContent = extractText(block.content);
+        return `<div class="content-block content-tool-result"><div class="block-label">${escapeHtml(label)}</div><div class="block-content">${escapeHtml(resultContent)}</div></div>`;
+      }
+      return `<div class="content-block"><pre class="block-content">${escapeHtml(JSON.stringify(block, null, 2))}</pre></div>`;
+    }).join('');
+  }
+  return `<pre>${escapeHtml(JSON.stringify(content, null, 2))}</pre>`;
+}
+
+function extractText(content) {
+  // Extract text from string or list[TextContent]
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return content.map(c => c.text || JSON.stringify(c)).join('\n');
+  }
+  return JSON.stringify(content, null, 2);
+}
+
+function escapeHtml(str) {
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+document.getElementById('detail-close').onclick = () => {
+  document.getElementById('detail').classList.remove('active');
+  if (selected) d3.selectAll('.node').classed('selected', false);
+  selected = null;
+};
+
+// Zoom into selected SubGraph node
+function zoomIntoSubGraph() {
+  if (selected && selected.type === 'sub_graph') {
+    enterSubGraph(selected);
+    // Close detail panel after zooming
+    document.getElementById('detail').classList.remove('active');
+    d3.selectAll('.node').classed('selected', false);
+    selected = null;
+  }
+}
+
+// Show meta info
+console.log('Graph loaded:', graphData.meta);
+
+// =============================================================================
+// SubGraph Navigation System
+// =============================================================================
+
+// Stack of graph levels for navigation
+const graphStack = [{
+  name: 'Main',
+  nodes: graphData.nodes,
+  edges: graphData.edges,
+  meta: graphData.meta
+}];
+let currentDepth = 0;
+
+// Parse SubGraph internal nodes into viewer format
+function parseSubGraphNodes(subGraphData) {
+  const nodes = [];
+  const nodeMap = subGraphData.nodes || {};
+
+  for (const [id, nodeData] of Object.entries(nodeMap)) {
+    if (!nodeData || typeof nodeData !== 'object') continue;
+
+    const data = nodeData.data || {};
+    const nodeType = getTypeFromData(data);
+
+    nodes.push({
+      id: id,
+      type: nodeType,
+      label: getLabelFromData(data, nodeType),
+      data: data,
+      metadata: nodeData.metadata || {},
+      timestamp: nodeData.timestamp || 0,
+      parent_count: (nodeData.parent_ids || []).length,
+      parent_ids: nodeData.parent_ids || []
+    });
+  }
+
+  return nodes;
+}
+
+// Parse SubGraph edges from node parent_ids
+function parseSubGraphEdges(subGraphData) {
+  const edges = [];
+  const nodeMap = subGraphData.nodes || {};
+
+  for (const [id, nodeData] of Object.entries(nodeMap)) {
+    if (!nodeData || typeof nodeData !== 'object') continue;
+
+    const parentIds = nodeData.parent_ids || [];
+    for (const parentId of parentIds) {
+      edges.push({ source: parentId, target: id });
+    }
+  }
+
+  return edges;
+}
+
+// Determine node type from serialized data
+function getTypeFromData(data) {
+  if (!data || typeof data !== 'object') return 'unknown';
+
+  const type = data.type;
+  if (type === 'system_prompt') return 'system_prompt';
+  if (type === 'tool_definitions') return 'tool_definitions';
+  if (type === 'tool_execution') return 'tool_exec';
+  if (type === 'stop_reason') return 'stop_reason';
+  if (type === 'sub_graph') return 'sub_graph';
+
+  // Check for message by role
+  if (data.role === 'user') return 'message_user';
+  if (data.role === 'assistant') return 'message_assistant';
+
+  return 'unknown';
+}
+
+// Generate label from serialized data
+function getLabelFromData(data, nodeType) {
+  if (!data) return '?';
+
+  if (nodeType === 'system_prompt') return 'SYSTEM';
+  if (nodeType === 'tool_definitions') {
+    const tools = data.tools || [];
+    return `TOOLS (${tools.length})`;
+  }
+  if (nodeType === 'tool_exec') {
+    return `⚡${data.tool_name || 'exec'}`;
+  }
+  if (nodeType === 'stop_reason') {
+    return `◉ ${data.reason || 'stop'}`;
+  }
+  if (nodeType === 'sub_graph') {
+    const depth = data.depth || 0;
+    const depthStr = depth > 0 ? `[d=${depth}]` : '';
+    return `🔄${data.tool_name || 'SubAgent'}${depthStr}`;
+  }
+  if (nodeType === 'message_user' || nodeType === 'message_assistant') {
+    const role = nodeType === 'message_user' ? 'USER' : 'ASST';
+    const content = data.content;
+    let preview = '';
+    if (typeof content === 'string') {
+      preview = content.slice(0, 20);
+    } else if (Array.isArray(content) && content.length > 0) {
+      const first = content[0];
+      if (first.type === 'text') preview = (first.text || '').slice(0, 15);
+      else if (first.type === 'tool_use') preview = `→${first.name || 'tool'}`;
+      else if (first.type === 'tool_result') preview = '←result';
+      else preview = '...';
+    }
+    return `${role}: ${preview}`;
+  }
+
+  return '?';
+}
+
+// Enter a SubGraph (drill down)
+function enterSubGraph(subGraphNode) {
+  if (!subGraphNode.data || !subGraphNode.data.nodes) {
+    console.warn('SubGraph has no nodes to explore');
+    return;
+  }
+
+  const subNodes = parseSubGraphNodes(subGraphNode.data);
+  const subEdges = parseSubGraphEdges(subGraphNode.data);
+
+  if (subNodes.length === 0) {
+    console.warn('SubGraph has no parseable nodes');
+    return;
+  }
+
+  // Push to stack
+  graphStack.push({
+    name: subGraphNode.data.tool_name || 'SubAgent',
+    nodes: subNodes,
+    edges: subEdges,
+    systemPrompt: subGraphNode.data.system_prompt,
+    summary: subGraphNode.data.summary,
+    depth: subGraphNode.data.depth || 0
+  });
+  currentDepth++;
+
+  // Re-render
+  renderCurrentGraph();
+  updateBreadcrumb();
+}
+
+// Navigate to a specific depth in the stack
+function navigateToDepth(depth) {
+  if (depth < 0 || depth >= graphStack.length) return;
+
+  // Pop stack until we reach target depth
+  while (graphStack.length > depth + 1) {
+    graphStack.pop();
+  }
+  currentDepth = depth;
+
+  // Re-render
+  renderCurrentGraph();
+  updateBreadcrumb();
+}
+
+// Update breadcrumb UI
+function updateBreadcrumb() {
+  const breadcrumb = document.getElementById('breadcrumb');
+  let html = '';
+
+  graphStack.forEach((level, i) => {
+    if (i > 0) html += '<span class="sep">›</span>';
+    const activeClass = i === currentDepth ? ' active' : '';
+    const onclick = i === currentDepth ? '' : `onclick="navigateToDepth(${i})"`;
+    html += `<span class="crumb${activeClass}" ${onclick}>${escapeHtml(level.name)}</span>`;
+  });
+
+  // Add hint for SubGraph exploration
+  const currentLevel = graphStack[currentDepth];
+  const hasSubGraphs = currentLevel.nodes.some(n => n.type === 'sub_graph');
+  if (hasSubGraphs) {
+    html += '<span class="hint">Click SubGraph nodes for zoom button</span>';
+  } else if (currentDepth > 0) {
+    html += '<span class="hint">Click breadcrumb to navigate back</span>';
+  }
+
+  breadcrumb.innerHTML = html;
+}
+
+// Render the current graph level
+function renderCurrentGraph() {
+  const currentLevel = graphStack[currentDepth];
+  const nodesData = currentLevel.nodes;
+  const edgesData = currentLevel.edges;
+
+  // Clear existing graph
+  g.selectAll('*').remove();
+
+  // Rebuild tool_use_id -> tool_name mapping for current level
+  const localToolNameMap = {};
+  nodesData.forEach(n => {
+    if (n.data && n.data.content && Array.isArray(n.data.content)) {
+      n.data.content.forEach(block => {
+        if (block.type === 'tool_use' && block.id && block.name) {
+          localToolNameMap[block.id] = block.name;
+        }
+      });
+    }
+  });
+  // Merge with global map
+  Object.assign(toolNameMap, localToolNameMap);
+
+  // Build dagre graph
+  const newDagreGraph = new dagre.graphlib.Graph();
+  newDagreGraph.setGraph({ rankdir: 'TB', nodesep: 50, ranksep: 60, marginx: 20, marginy: 20 });
+  newDagreGraph.setDefaultEdgeLabel(() => ({}));
+
+  // Add nodes
+  nodesData.forEach(n => {
+    newDagreGraph.setNode(n.id, { width: nodeWidth, height: nodeHeight, data: n });
+  });
+
+  // Add edges
+  edgesData.forEach(e => {
+    newDagreGraph.setEdge(e.source, e.target);
+  });
+
+  // Layout
+  dagre.layout(newDagreGraph);
+
+  // Get positions
+  const newNodeMap = new Map();
+  newDagreGraph.nodes().forEach(id => {
+    const node = newDagreGraph.node(id);
+    if (node && node.data) {
+      node.data.x = node.x;
+      node.data.y = node.y;
+      newNodeMap.set(id, node.data);
+    }
+  });
+
+  // Compute bounds and set viewBox
+  const xs = nodesData.map(n => n.x).filter(x => x !== undefined);
+  const ys = nodesData.map(n => n.y).filter(y => y !== undefined);
+
+  if (xs.length === 0 || ys.length === 0) {
+    // No positioned nodes
+    svg.attr('viewBox', '0 0 400 300');
+    return;
+  }
+
+  const minX = Math.min(...xs) - nodeWidth;
+  const maxX = Math.max(...xs) + nodeWidth;
+  const minY = Math.min(...ys) - nodeHeight;
+  const maxY = Math.max(...ys) + nodeHeight;
+  svg.attr('viewBox', `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
+
+  // Draw edges with curves
+  g.selectAll('.edge')
+    .data(edgesData.filter(d => newNodeMap.has(d.source) && newNodeMap.has(d.target)))
+    .join('path')
+    .attr('class', 'edge')
+    .attr('marker-end', 'url(#arrow)')
+    .attr('d', d => {
+      const source = newNodeMap.get(d.source);
+      const target = newNodeMap.get(d.target);
+      const sy = source.y + nodeHeight/2;
+      const ty = target.y - nodeHeight/2;
+      const midY = (sy + ty) / 2;
+      return `M${source.x},${sy} C${source.x},${midY} ${target.x},${midY} ${target.x},${ty}`;
+    });
+
+  // Draw nodes
+  const newNodes = g.selectAll('.node')
+    .data(nodesData.filter(n => n.x !== undefined))
+    .join('g')
+    .attr('class', d => `node type-${d.type}`)
+    .attr('transform', d => `translate(${d.x - nodeWidth/2},${d.y - nodeHeight/2})`)
+    .on('click', (e, d) => showDetail(d));
+
+  newNodes.append('rect')
+    .attr('width', nodeWidth)
+    .attr('height', nodeHeight)
+    .attr('rx', 6);
+
+  newNodes.append('text')
+    .attr('x', nodeWidth / 2)
+    .attr('y', nodeHeight / 2 + 4)
+    .attr('text-anchor', 'middle')
+    .text(d => d.label.length > 18 ? d.label.slice(0, 16) + '...' : d.label);
+}
+
+// Initialize breadcrumb
+updateBreadcrumb();
+</script>
+</body>
+</html>

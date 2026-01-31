@@ -10,6 +10,7 @@ from nano_agent import (
     Node,
     Role,
     StopReason,
+    SubGraph,
     SystemPrompt,
     TextContent,
     ToolDefinitions,
@@ -61,6 +62,8 @@ def get_type(n: Node) -> str:
         return "tool_exec"
     elif isinstance(n.data, StopReason):
         return "stop_reason"
+    elif isinstance(n.data, SubGraph):
+        return "sub_graph"
     elif isinstance(n.data, Message):
         return f"message_{n.data.role.value}"
     return "unknown"
@@ -75,6 +78,9 @@ def get_label(n: Node) -> str:
         return f"⚡{n.data.tool_name}"
     elif isinstance(n.data, StopReason):
         return f"◉ {n.data.reason}"
+    elif isinstance(n.data, SubGraph):
+        depth_str = f"[d={n.data.depth}]" if n.data.depth > 0 else ""
+        return f"🔄{n.data.tool_name}{depth_str}"
     elif isinstance(n.data, Message):
         role = "USER" if n.data.role == Role.USER else "ASST"
         content = n.data.content
@@ -138,7 +144,14 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 <script src="https://unpkg.com/@dagrejs/dagre@1.0.4/dist/dagre.min.js"></script>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; height: 100vh; background: #1a1a2e; color: #eee; }
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; height: 100vh; background: #1a1a2e; color: #eee; }
+#breadcrumb { background: #0f0f23; border-bottom: 1px solid #333; padding: 10px 20px; display: flex; align-items: center; gap: 8px; min-height: 44px; }
+#breadcrumb .crumb { color: #888; cursor: pointer; padding: 4px 10px; border-radius: 4px; font-size: 13px; transition: all 0.2s; }
+#breadcrumb .crumb:hover { background: #1a1a3e; color: #fff; }
+#breadcrumb .crumb.active { background: #ff9800; color: #000; font-weight: 600; cursor: default; }
+#breadcrumb .sep { color: #555; font-size: 14px; }
+#breadcrumb .hint { color: #666; font-size: 11px; margin-left: auto; font-style: italic; }
+#main-container { flex: 1; display: flex; overflow: hidden; }
 #graph { flex: 1; overflow: hidden; }
 #detail { width: 400px; background: #16213e; border-left: 1px solid #333; overflow-y: auto; display: none; }
 #detail.active { display: block; }
@@ -198,10 +211,24 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-
 .type-dict rect { fill: #ffe6f3; stroke: #d94a90; }
 .type-stop_reason rect { fill: #ff5555; stroke: #ff0000; }
 .type-stop_reason text { fill: #fff !important; font-weight: bold; }
+/* SubGraph nodes: dashed border, clickable indicator */
+.type-sub_graph rect { fill: #fff3e0; stroke: #ff9800; stroke-dasharray: 5,3; }
+.type-sub_graph text { fill: #e65100 !important; font-weight: bold; }
+.type-sub_graph:hover rect { stroke-width: 3px; }
+/* Zoom button styles */
+.zoom-btn { background: #ff9800; color: #000; border: none; padding: 10px 20px; border-radius: 6px; font-size: 14px; font-weight: 600; cursor: pointer; width: 100%; margin-top: 10px; transition: all 0.2s; }
+.zoom-btn:hover { background: #ffa726; transform: translateY(-1px); }
+.zoom-btn.zoom-out { background: #666; color: #fff; }
+.zoom-btn.zoom-out:hover { background: #888; }
 svg { width: 100%; height: 100%; }
 </style>
 </head>
 <body>
+<div id="breadcrumb">
+  <span class="crumb active">Main</span>
+  <span class="hint">Click SubGraph nodes for zoom button</span>
+</div>
+<div id="main-container">
 <div id="graph"></div>
 <div id="detail">
   <div id="detail-header">
@@ -209,6 +236,7 @@ svg { width: 100%; height: 100%; }
     <button id="detail-close">&times;</button>
   </div>
   <div id="detail-content"></div>
+</div>
 </div>
 
 <script>
@@ -325,7 +353,7 @@ nodes.append('text')
 let selected = null;
 
 function showDetail(node) {
-  if (selected) d3.select(`.node[data-id="${selected.id}"]`).classed('selected', false);
+  if (selected) d3.selectAll('.node').classed('selected', false);
   selected = node;
   d3.selectAll('.node').classed('selected', d => d.id === node.id);
 
@@ -354,6 +382,21 @@ function buildDetailHTML(node) {
   // Tool execution node
   if (node.type === 'tool_exec') {
     html += section('Tool Execution', formatToolExec(node.data));
+  }
+
+  // SubGraph node
+  if (node.type === 'sub_graph') {
+    const nodeCount = node.data.nodes ? Object.keys(node.data.nodes).length : 0;
+    html += section('Sub-Agent', `
+      <div class="content-block content-tool-exec">
+        <div class="block-label">🔄 ${escapeHtml(node.data.tool_name)} (depth: ${node.data.depth || 0})</div>
+        <div class="block-content">${escapeHtml(node.data.summary || '(no summary)')}</div>
+      </div>
+      ${nodeCount > 0 ? `<button class="zoom-btn" onclick="zoomIntoSubGraph()">🔍 Zoom Into Sub-Agent (${nodeCount} nodes)</button>` : ''}
+    `);
+    if (node.data.system_prompt) {
+      html += section('Sub-Agent System Prompt', `<div class="content-block content-system"><div class="block-content">${escapeHtml(node.data.system_prompt)}</div></div>`);
+    }
   }
 
   // Stop reason node
@@ -482,8 +525,308 @@ document.getElementById('detail-close').onclick = () => {
   selected = null;
 };
 
+// Zoom into selected SubGraph node
+function zoomIntoSubGraph() {
+  if (selected && selected.type === 'sub_graph') {
+    enterSubGraph(selected);
+    // Close detail panel after zooming
+    document.getElementById('detail').classList.remove('active');
+    d3.selectAll('.node').classed('selected', false);
+    selected = null;
+  }
+}
+
 // Show meta info
 console.log('Graph loaded:', graphData.meta);
+
+// =============================================================================
+// SubGraph Navigation System
+// =============================================================================
+
+// Stack of graph levels for navigation
+const graphStack = [{
+  name: 'Main',
+  nodes: graphData.nodes,
+  edges: graphData.edges,
+  meta: graphData.meta
+}];
+let currentDepth = 0;
+
+// Parse SubGraph internal nodes into viewer format
+function parseSubGraphNodes(subGraphData) {
+  const nodes = [];
+  const nodeMap = subGraphData.nodes || {};
+
+  for (const [id, nodeData] of Object.entries(nodeMap)) {
+    if (!nodeData || typeof nodeData !== 'object') continue;
+
+    const data = nodeData.data || {};
+    const nodeType = getTypeFromData(data);
+
+    nodes.push({
+      id: id,
+      type: nodeType,
+      label: getLabelFromData(data, nodeType),
+      data: data,
+      metadata: nodeData.metadata || {},
+      timestamp: nodeData.timestamp || 0,
+      parent_count: (nodeData.parent_ids || []).length,
+      parent_ids: nodeData.parent_ids || []
+    });
+  }
+
+  return nodes;
+}
+
+// Parse SubGraph edges from node parent_ids
+function parseSubGraphEdges(subGraphData) {
+  const edges = [];
+  const nodeMap = subGraphData.nodes || {};
+
+  for (const [id, nodeData] of Object.entries(nodeMap)) {
+    if (!nodeData || typeof nodeData !== 'object') continue;
+
+    const parentIds = nodeData.parent_ids || [];
+    for (const parentId of parentIds) {
+      edges.push({ source: parentId, target: id });
+    }
+  }
+
+  return edges;
+}
+
+// Determine node type from serialized data
+function getTypeFromData(data) {
+  if (!data || typeof data !== 'object') return 'unknown';
+
+  const type = data.type;
+  if (type === 'system_prompt') return 'system_prompt';
+  if (type === 'tool_definitions') return 'tool_definitions';
+  if (type === 'tool_execution') return 'tool_exec';
+  if (type === 'stop_reason') return 'stop_reason';
+  if (type === 'sub_graph') return 'sub_graph';
+
+  // Check for message by role
+  if (data.role === 'user') return 'message_user';
+  if (data.role === 'assistant') return 'message_assistant';
+
+  return 'unknown';
+}
+
+// Generate label from serialized data
+function getLabelFromData(data, nodeType) {
+  if (!data) return '?';
+
+  if (nodeType === 'system_prompt') return 'SYSTEM';
+  if (nodeType === 'tool_definitions') {
+    const tools = data.tools || [];
+    return `TOOLS (${tools.length})`;
+  }
+  if (nodeType === 'tool_exec') {
+    return `⚡${data.tool_name || 'exec'}`;
+  }
+  if (nodeType === 'stop_reason') {
+    return `◉ ${data.reason || 'stop'}`;
+  }
+  if (nodeType === 'sub_graph') {
+    const depth = data.depth || 0;
+    const depthStr = depth > 0 ? `[d=${depth}]` : '';
+    return `🔄${data.tool_name || 'SubAgent'}${depthStr}`;
+  }
+  if (nodeType === 'message_user' || nodeType === 'message_assistant') {
+    const role = nodeType === 'message_user' ? 'USER' : 'ASST';
+    const content = data.content;
+    let preview = '';
+    if (typeof content === 'string') {
+      preview = content.slice(0, 20);
+    } else if (Array.isArray(content) && content.length > 0) {
+      const first = content[0];
+      if (first.type === 'text') preview = (first.text || '').slice(0, 15);
+      else if (first.type === 'tool_use') preview = `→${first.name || 'tool'}`;
+      else if (first.type === 'tool_result') preview = '←result';
+      else preview = '...';
+    }
+    return `${role}: ${preview}`;
+  }
+
+  return '?';
+}
+
+// Enter a SubGraph (drill down)
+function enterSubGraph(subGraphNode) {
+  if (!subGraphNode.data || !subGraphNode.data.nodes) {
+    console.warn('SubGraph has no nodes to explore');
+    return;
+  }
+
+  const subNodes = parseSubGraphNodes(subGraphNode.data);
+  const subEdges = parseSubGraphEdges(subGraphNode.data);
+
+  if (subNodes.length === 0) {
+    console.warn('SubGraph has no parseable nodes');
+    return;
+  }
+
+  // Push to stack
+  graphStack.push({
+    name: subGraphNode.data.tool_name || 'SubAgent',
+    nodes: subNodes,
+    edges: subEdges,
+    systemPrompt: subGraphNode.data.system_prompt,
+    summary: subGraphNode.data.summary,
+    depth: subGraphNode.data.depth || 0
+  });
+  currentDepth++;
+
+  // Re-render
+  renderCurrentGraph();
+  updateBreadcrumb();
+}
+
+// Navigate to a specific depth in the stack
+function navigateToDepth(depth) {
+  if (depth < 0 || depth >= graphStack.length) return;
+
+  // Pop stack until we reach target depth
+  while (graphStack.length > depth + 1) {
+    graphStack.pop();
+  }
+  currentDepth = depth;
+
+  // Re-render
+  renderCurrentGraph();
+  updateBreadcrumb();
+}
+
+// Update breadcrumb UI
+function updateBreadcrumb() {
+  const breadcrumb = document.getElementById('breadcrumb');
+  let html = '';
+
+  graphStack.forEach((level, i) => {
+    if (i > 0) html += '<span class="sep">›</span>';
+    const activeClass = i === currentDepth ? ' active' : '';
+    const onclick = i === currentDepth ? '' : `onclick="navigateToDepth(${i})"`;
+    html += `<span class="crumb${activeClass}" ${onclick}>${escapeHtml(level.name)}</span>`;
+  });
+
+  // Add hint for SubGraph exploration
+  const currentLevel = graphStack[currentDepth];
+  const hasSubGraphs = currentLevel.nodes.some(n => n.type === 'sub_graph');
+  if (hasSubGraphs) {
+    html += '<span class="hint">Click SubGraph nodes for zoom button</span>';
+  } else if (currentDepth > 0) {
+    html += '<span class="hint">Click breadcrumb to navigate back</span>';
+  }
+
+  breadcrumb.innerHTML = html;
+}
+
+// Render the current graph level
+function renderCurrentGraph() {
+  const currentLevel = graphStack[currentDepth];
+  const nodesData = currentLevel.nodes;
+  const edgesData = currentLevel.edges;
+
+  // Clear existing graph
+  g.selectAll('*').remove();
+
+  // Rebuild tool_use_id -> tool_name mapping for current level
+  const localToolNameMap = {};
+  nodesData.forEach(n => {
+    if (n.data && n.data.content && Array.isArray(n.data.content)) {
+      n.data.content.forEach(block => {
+        if (block.type === 'tool_use' && block.id && block.name) {
+          localToolNameMap[block.id] = block.name;
+        }
+      });
+    }
+  });
+  // Merge with global map
+  Object.assign(toolNameMap, localToolNameMap);
+
+  // Build dagre graph
+  const newDagreGraph = new dagre.graphlib.Graph();
+  newDagreGraph.setGraph({ rankdir: 'TB', nodesep: 50, ranksep: 60, marginx: 20, marginy: 20 });
+  newDagreGraph.setDefaultEdgeLabel(() => ({}));
+
+  // Add nodes
+  nodesData.forEach(n => {
+    newDagreGraph.setNode(n.id, { width: nodeWidth, height: nodeHeight, data: n });
+  });
+
+  // Add edges
+  edgesData.forEach(e => {
+    newDagreGraph.setEdge(e.source, e.target);
+  });
+
+  // Layout
+  dagre.layout(newDagreGraph);
+
+  // Get positions
+  const newNodeMap = new Map();
+  newDagreGraph.nodes().forEach(id => {
+    const node = newDagreGraph.node(id);
+    if (node && node.data) {
+      node.data.x = node.x;
+      node.data.y = node.y;
+      newNodeMap.set(id, node.data);
+    }
+  });
+
+  // Compute bounds and set viewBox
+  const xs = nodesData.map(n => n.x).filter(x => x !== undefined);
+  const ys = nodesData.map(n => n.y).filter(y => y !== undefined);
+
+  if (xs.length === 0 || ys.length === 0) {
+    // No positioned nodes
+    svg.attr('viewBox', '0 0 400 300');
+    return;
+  }
+
+  const minX = Math.min(...xs) - nodeWidth;
+  const maxX = Math.max(...xs) + nodeWidth;
+  const minY = Math.min(...ys) - nodeHeight;
+  const maxY = Math.max(...ys) + nodeHeight;
+  svg.attr('viewBox', `${minX} ${minY} ${maxX - minX} ${maxY - minY}`);
+
+  // Draw edges with curves
+  g.selectAll('.edge')
+    .data(edgesData.filter(d => newNodeMap.has(d.source) && newNodeMap.has(d.target)))
+    .join('path')
+    .attr('class', 'edge')
+    .attr('marker-end', 'url(#arrow)')
+    .attr('d', d => {
+      const source = newNodeMap.get(d.source);
+      const target = newNodeMap.get(d.target);
+      const sy = source.y + nodeHeight/2;
+      const ty = target.y - nodeHeight/2;
+      const midY = (sy + ty) / 2;
+      return `M${source.x},${sy} C${source.x},${midY} ${target.x},${midY} ${target.x},${ty}`;
+    });
+
+  // Draw nodes
+  const newNodes = g.selectAll('.node')
+    .data(nodesData.filter(n => n.x !== undefined))
+    .join('g')
+    .attr('class', d => `node type-${d.type}`)
+    .attr('transform', d => `translate(${d.x - nodeWidth/2},${d.y - nodeHeight/2})`)
+    .on('click', (e, d) => showDetail(d));
+
+  newNodes.append('rect')
+    .attr('width', nodeWidth)
+    .attr('height', nodeHeight)
+    .attr('rx', 6);
+
+  newNodes.append('text')
+    .attr('x', nodeWidth / 2)
+    .attr('y', nodeHeight / 2 + 4)
+    .attr('text-anchor', 'middle')
+    .text(d => d.label.length > 18 ? d.label.slice(0, 16) + '...' : d.label);
+}
+
+// Initialize breadcrumb
+updateBreadcrumb();
 </script>
 </body>
 </html>

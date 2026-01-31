@@ -8,10 +8,15 @@ Uses algebraic data types (sum types via Union) for type-safe
 pattern matching and exhaustiveness checking.
 """
 
+from __future__ import annotations
+
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Never, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Never, TypeAlias, TypedDict
+
+if TYPE_CHECKING:
+    from .dag import DAG
 
 # =============================================================================
 # JSON Type Aliases
@@ -149,6 +154,19 @@ class ToolExecutionDict(TypedDict):
     is_error: bool
 
 
+class SubGraphDict(TypedDict, total=False):
+    """Serialized form of SubGraph."""
+
+    type: str
+    tool_name: str
+    tool_use_id: str
+    system_prompt: str
+    nodes: dict[str, object]  # Serialized nodes
+    head_ids: list[str]
+    summary: str
+    depth: int
+
+
 class StopReasonDict(TypedDict):
     """Serialized form of StopReason."""
 
@@ -179,6 +197,23 @@ class ResponseDict(TypedDict, total=False):
     content: list[ContentBlockDict]
     stop_reason: str | None
     usage: UsageDict
+
+
+# =============================================================================
+# Type Conversion Helpers
+# =============================================================================
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    """Safely convert an object to int, returning default if not possible."""
+    if isinstance(value, int):
+        return value
+    if isinstance(value, (float, str)):
+        try:
+            return int(value)
+        except (ValueError, TypeError):
+            return default
+    return default
 
 
 # =============================================================================
@@ -577,6 +612,136 @@ class StopReason:
         )
 
 
+@dataclass(frozen=True)
+class SubGraph:
+    """Encapsulated sub-agent execution graph.
+
+    This node type captures the complete execution of a sub-agent,
+    including its system prompt, all nodes, and a summary of results.
+    """
+
+    tool_name: str
+    tool_use_id: str
+    system_prompt: str
+    nodes: dict[str, object]  # Serialized nodes from sub-agent DAG
+    head_ids: list[str]
+    summary: str = ""
+    depth: int = 0
+
+    def __post_init__(self) -> None:
+        if not self.tool_name:
+            raise ValueError("tool_name cannot be empty")
+        if not self.tool_use_id:
+            raise ValueError("tool_use_id cannot be empty")
+
+    def to_dict(self) -> "SubGraphDict":
+        return {
+            "type": "sub_graph",
+            "tool_name": self.tool_name,
+            "tool_use_id": self.tool_use_id,
+            "system_prompt": self.system_prompt,
+            "nodes": self.nodes,
+            "head_ids": self.head_ids,
+            "summary": self.summary,
+            "depth": self.depth,
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "SubGraph":
+        nodes_raw = data.get("nodes", {})
+        nodes = dict(nodes_raw) if isinstance(nodes_raw, Mapping) else {}
+        head_ids_raw = data.get("head_ids", [])
+        head_ids = list(head_ids_raw) if isinstance(head_ids_raw, list) else []
+        return cls(
+            tool_name=str(data.get("tool_name", "")),
+            tool_use_id=str(data.get("tool_use_id", "")),
+            system_prompt=str(data.get("system_prompt", "")),
+            nodes=nodes,
+            head_ids=head_ids,
+            summary=str(data.get("summary", "")),
+            depth=_safe_int(data.get("depth", 0)),
+        )
+
+    @classmethod
+    def from_dag(
+        cls,
+        dag: "DAG",  # Forward reference - resolved at runtime
+        tool_name: str,
+        tool_use_id: str,
+        summary: str = "",
+        depth: int = 0,
+    ) -> "SubGraph":
+        """Create SubGraph from a DAG instance.
+
+        Args:
+            dag: The sub-agent's completed DAG
+            tool_name: Name of the tool that spawned this sub-agent
+            tool_use_id: ID of the tool call
+            summary: Summary of the sub-agent's results
+            depth: Nesting depth of this sub-agent
+
+        Returns:
+            SubGraph containing serialized DAG
+        """
+        # Collect all nodes from DAG
+        all_nodes: dict[str, object] = {}
+        head_ids: list[str] = []
+
+        if dag._heads:
+            for head in dag._heads:
+                head_ids.append(head.id)
+                for node in head.ancestors():
+                    all_nodes[node.id] = node.to_dict()
+
+        return cls(
+            tool_name=tool_name,
+            tool_use_id=tool_use_id,
+            system_prompt=dag.get_system_prompt() if dag._heads else "",
+            nodes=all_nodes,
+            head_ids=head_ids,
+            summary=summary,
+            depth=depth,
+        )
+
+    def to_dag(self) -> "DAG":
+        """Reconstruct DAG from serialized nodes.
+
+        Returns:
+            DAG instance with reconstructed nodes
+        """
+        # Import here to avoid circular dependency
+        from .dag import DAG, Node
+
+        if not self.nodes:
+            return DAG()
+
+        # Reconstruct nodes
+        node_map: dict[str, Node] = {}
+        remaining = dict(self.nodes)
+
+        while remaining:
+            ready = [
+                nid
+                for nid, ndata in remaining.items()
+                if isinstance(ndata, dict)
+                and all(pid in node_map for pid in ndata.get("parent_ids", []))
+            ]
+            if not ready:
+                raise ValueError("Cycle or missing parents in SubGraph")
+            for nid in ready:
+                ndata = remaining.pop(nid)
+                if isinstance(ndata, dict):
+                    node_map[nid] = Node._from_dict(ndata, node_map)
+
+        heads = [node_map[hid] for hid in self.head_ids if hid in node_map]
+        if not heads and node_map:
+            # Find leaf nodes
+            has_children = {p.id for n in node_map.values() for p in n.parents}
+            heads = [n for n in node_map.values() if n.id not in has_children]
+
+        return DAG(_heads=tuple(heads))
+
+
 # =============================================================================
 # Parsing Helpers (centralized raw dict parsing)
 # =============================================================================
@@ -722,9 +887,33 @@ def parse_stop_reason(raw: object) -> StopReason | None:
     return StopReason(reason=reason, usage=usage_dict)
 
 
+def parse_sub_graph(raw: object) -> SubGraph | None:
+    if not isinstance(raw, dict):
+        return None
+    tool_name = raw.get("tool_name")
+    tool_use_id = raw.get("tool_use_id")
+    if not isinstance(tool_name, str) or not isinstance(tool_use_id, str):
+        return None
+    nodes_raw = raw.get("nodes", {})
+    nodes = dict(nodes_raw) if isinstance(nodes_raw, dict) else {}
+    head_ids_raw = raw.get("head_ids", [])
+    head_ids = list(head_ids_raw) if isinstance(head_ids_raw, list) else []
+    return SubGraph(
+        tool_name=tool_name,
+        tool_use_id=tool_use_id,
+        system_prompt=str(raw.get("system_prompt", "")),
+        nodes=nodes,
+        head_ids=head_ids,
+        summary=str(raw.get("summary", "")),
+        depth=int(raw.get("depth", 0)) if raw.get("depth") is not None else 0,
+    )
+
+
 # Sum type for node data (algebraic data type)
 # Use class-based pattern matching: match data: case Message(): ...
-NodeData = Message | SystemPrompt | ToolDefinitions | ToolExecution | StopReason
+NodeData = (
+    Message | SystemPrompt | ToolDefinitions | ToolExecution | StopReason | SubGraph
+)
 
 
 # =============================================================================

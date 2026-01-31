@@ -8,20 +8,81 @@ import tempfile
 import time
 import types
 import uuid
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
+    TYPE_CHECKING,
     Annotated,
     Any,
     ClassVar,
+    Protocol,
     TypedDict,
     Union,
     get_args,
     get_origin,
     get_type_hints,
+    runtime_checkable,
 )
 
 from ..data_structures import TextContent
+
+if TYPE_CHECKING:
+    from ..data_structures import SubGraph
+    from ..execution_context import ExecutionContext
+
+
+# =============================================================================
+# Sub-Agent Capable Protocol
+# =============================================================================
+
+
+@runtime_checkable
+class SubAgentCapable(Protocol):
+    """Protocol for tools that can spawn sub-agents.
+
+    Tools implementing this protocol will receive an ExecutionContext
+    that provides access to the LLM API and current DAG, allowing them
+    to spawn sub-agents.
+
+    Example implementation:
+        @dataclass
+        class CodeReviewTool(Tool, SubAgentCapable):
+            name: str = "CodeReview"
+            description: str = "Spawn a sub-agent to review code"
+
+            _execution_context: ExecutionContext | None = field(
+                default=None, repr=False
+            )
+
+            def set_execution_context(self, ctx: ExecutionContext | None) -> None:
+                object.__setattr__(self, '_execution_context', ctx)
+
+            async def __call__(self, input: CodeReviewInput) -> TextContent:
+                if not self._execution_context:
+                    return TextContent(text="Error: No execution context")
+
+                result_dag, sub_graph = await run_sub_agent(
+                    context=self._execution_context,
+                    system_prompt="You are an expert code reviewer...",
+                    user_message=f"Review: {input.file_path}",
+                    tools=[ReadTool(), GrepTool()],
+                )
+                return TextContent(text=sub_graph.summary)
+    """
+
+    _execution_context: ExecutionContext | None
+
+    def set_execution_context(self, ctx: ExecutionContext | None) -> None:
+        """Set or clear the execution context.
+
+        Called by the executor before and after tool execution.
+
+        Args:
+            ctx: ExecutionContext to set, or None to clear
+        """
+        ...
+
 
 # =============================================================================
 # Truncation Configuration and State
@@ -654,7 +715,9 @@ class Tool:
         }
 
     async def execute(
-        self, input: dict[str, Any] | None = None
+        self,
+        input: dict[str, Any] | None = None,
+        execution_context: "ExecutionContext | None" = None,
     ) -> "TextContent | list[TextContent]":
         """Execute the tool with automatic output truncation.
 
@@ -662,27 +725,44 @@ class Tool:
         It handles:
         1. Conversion from raw API dict to typed input
         2. Automatic truncation of large outputs (saves full output to temp file)
+        3. Injection of ExecutionContext for sub-agent-capable tools
+
+        Args:
+            input: Raw input dict from API (will be converted to typed dataclass)
+            execution_context: Optional context for sub-agent-capable tools
+
+        Returns:
+            TextContent or list of TextContent with tool results
 
         Truncation can be configured per-tool via _truncation_config class variable.
         """
-        if self._no_input:
-            # No-input tool: call without arguments
-            result = await self.__call__()  # type: ignore[call-arg]
-        else:
-            typed_input = convert_input(input, self._input_type)
-            result = await self.__call__(typed_input)
+        # Inject execution context for sub-agent-capable tools
+        if execution_context is not None and isinstance(self, SubAgentCapable):
+            self.set_execution_context(execution_context)
 
-        # Apply truncation if enabled
-        config = self._truncation_config or _DEFAULT_TRUNCATION_CONFIG
-        if config.enabled:
-            if isinstance(result, list):
-                result = [
-                    _truncate_text_content(tc, self.name, config) for tc in result
-                ]
+        try:
+            if self._no_input:
+                # No-input tool: call without arguments
+                result = await self.__call__()  # type: ignore[call-arg]
             else:
-                result = _truncate_text_content(result, self.name, config)
+                typed_input = convert_input(input, self._input_type)
+                result = await self.__call__(typed_input)
 
-        return result
+            # Apply truncation if enabled
+            config = self._truncation_config or _DEFAULT_TRUNCATION_CONFIG
+            if config.enabled:
+                if isinstance(result, list):
+                    result = [
+                        _truncate_text_content(tc, self.name, config) for tc in result
+                    ]
+                else:
+                    result = _truncate_text_content(result, self.name, config)
+
+            return result
+        finally:
+            # Clear execution context after execution
+            if isinstance(self, SubAgentCapable):
+                self.set_execution_context(None)
 
     async def __call__(
         self, input: Any
@@ -692,3 +772,90 @@ class Tool:
         For no-input tools, simply omit the input parameter in your override.
         """
         raise NotImplementedError(f"{self.name} does not implement __call__()")
+
+
+# =============================================================================
+# Sub-Agent Tool Base Class
+# =============================================================================
+
+
+@dataclass
+class SubAgentTool(Tool, SubAgentCapable):
+    """Base class for tools that spawn sub-agents.
+
+    This class combines Tool and SubAgentCapable, providing a `spawn()` helper
+    that handles the boilerplate of running sub-agents.
+
+    Example:
+        @dataclass
+        class SecurityAuditInput:
+            file_path: Annotated[str, Desc("Path to the file to audit")]
+
+        @dataclass
+        class SecurityAuditTool(SubAgentTool):
+            name: str = "SecurityAudit"
+            description: str = "Spawn a sub-agent to audit code for security issues"
+
+            async def __call__(self, input: SecurityAuditInput) -> TextContent:
+                summary = await self.spawn(
+                    system_prompt="You are an expert security auditor...",
+                    user_message=f"Audit the file: {input.file_path}",
+                    tools=[ReadTool()],
+                )
+                return TextContent(text=summary)
+
+    The base class handles:
+    - ExecutionContext injection (via set_execution_context)
+    - SubGraph storage (via last_sub_graph)
+    - Sub-agent spawning (via spawn())
+    """
+
+    # Internal state - not included in repr
+    _execution_context: "ExecutionContext | None" = field(default=None, repr=False)
+    last_sub_graph: "SubGraph | None" = field(default=None, repr=False)
+
+    def set_execution_context(self, ctx: "ExecutionContext | None") -> None:
+        """Set or clear the execution context."""
+        object.__setattr__(self, "_execution_context", ctx)
+
+    async def spawn(
+        self,
+        system_prompt: str,
+        user_message: str,
+        tools: "Sequence[Tool] | None" = None,
+        tool_name: str | None = None,
+    ) -> str:
+        """Spawn a sub-agent and return its summary.
+
+        This is the main helper method that simplifies sub-agent creation.
+
+        Args:
+            system_prompt: System prompt for the sub-agent
+            user_message: Initial user message/task for the sub-agent
+            tools: Optional list of tools for the sub-agent
+            tool_name: Name for the sub-agent (defaults to self.name)
+
+        Returns:
+            The summary text from the sub-agent's execution
+
+        Raises:
+            RuntimeError: If no execution context is available
+        """
+        if not self._execution_context:
+            raise RuntimeError(f"{self.name}: No execution context available")
+
+        # Import here to avoid circular dependency
+        from ..execution_context import run_sub_agent
+
+        _, sub_graph = await run_sub_agent(
+            context=self._execution_context,
+            system_prompt=system_prompt,
+            user_message=user_message,
+            tools=tools,
+            tool_name=tool_name or self.name,
+        )
+
+        # Store for later access
+        object.__setattr__(self, "last_sub_graph", sub_graph)
+
+        return sub_graph.summary

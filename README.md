@@ -17,6 +17,8 @@ dag = dag.assistant(response.content) # New DAG
 
 **Built-in Tools** - `BashTool`, `ReadTool`, `WriteTool`, `EditTool`, `GlobTool`, `GrepTool`, `StatTool`, `PythonTool`, `TodoWriteTool`, `WebFetchTool`.
 
+**Sub-Agents** - Tools can spawn their own agents using `SubAgentTool`. Supports recursive nesting and parallel execution.
+
 **Visualization** - Print any DAG to see the conversation flow, or export to HTML:
 
 ```
@@ -166,6 +168,41 @@ nano-cli --debug
 | Ctrl+D | Exit |
 
 Note: Ctrl+J and Shift+Enter are not supported.
+
+## Sub-Agents
+
+Create tools that spawn their own agents using `SubAgentTool`:
+
+```python
+from dataclasses import dataclass
+from typing import Annotated
+from nano_agent import SubAgentTool, TextContent, ReadTool
+from nano_agent.tools.base import Desc
+
+@dataclass
+class CodeReviewInput:
+    file_path: Annotated[str, Desc("Path to the file to review")]
+
+@dataclass
+class CodeReviewTool(SubAgentTool):
+    name: str = "CodeReview"
+    description: str = "Spawn a sub-agent to review code"
+
+    async def __call__(self, input: CodeReviewInput) -> TextContent:
+        summary = await self.spawn(
+            system_prompt="You are an expert code reviewer...",
+            user_message=f"Review: {input.file_path}",
+            tools=[ReadTool()],
+        )
+        return TextContent(text=summary)
+```
+
+Features:
+- **Recursive nesting**: Sub-agents can spawn their own sub-agents (with depth limits)
+- **Parallel execution**: Multiple sub-agent tools can run concurrently
+- **Graph visualization**: Sub-agent graphs are captured and viewable in HTML export
+
+See `examples/parallel_sub_agents.py` and `examples/recursive_sub_agents.py` for complete examples.
 
 ## License
 
