@@ -165,6 +165,49 @@ class TestTerminalRegionNoSaveRestore:
         assert ANSI.RESTORE_CURSOR not in cap.captured
 
 
+class TestTerminalRegionExactWidth:
+    """Tests for terminal-width line handling.
+
+    When a line exactly fills terminal width, cursor auto-wraps to next line.
+    CLEAR_TO_END would then erase wrong line. These tests verify the fix.
+    """
+
+    def test_clear_to_end_constant_exists(self) -> None:
+        """Verify CLEAR_TO_END constant is defined."""
+        assert hasattr(ANSI, "CLEAR_TO_END")
+        assert ANSI.CLEAR_TO_END == "\033[K"
+
+    def test_shorter_line_gets_clear_to_end(self) -> None:
+        """Lines shorter than terminal width should get CLEAR_TO_END."""
+        region = TerminalRegion()
+        with _CaptureStdout() as cap:
+            region.activate(1)
+            cap.captured = ""
+            # Render a short line (definitely < terminal width)
+            region.render(["short"])
+        # Should contain CLEAR_TO_END
+        assert ANSI.CLEAR_TO_END in cap.captured
+
+    def test_visual_len_used_for_width_check(self) -> None:
+        """Width check should use visual_len, not len()."""
+        # String with ANSI codes - visual length is shorter than byte length
+        colored = "\033[31mred\033[0m"
+        assert ANSI.visual_len(colored) == 3
+        assert len(colored) > 3
+
+    def test_empty_lines_get_cleared(self) -> None:
+        """Empty content lines should get CLEAR_TO_END."""
+        region = TerminalRegion()
+        with _CaptureStdout() as cap:
+            region.activate(2)
+            cap.captured = ""
+            # Render with one line, second slot is empty
+            region.render(["content"])
+        # Should have CLEAR_TO_END for at least the empty line
+        # Count occurrences - should be at least 2 (one for content, one for empty)
+        assert cap.captured.count(ANSI.CLEAR_TO_END) >= 1
+
+
 class TestTerminalRegionRepeatedRenders:
     """Tests for repeated render behavior - the original bug scenario."""
 

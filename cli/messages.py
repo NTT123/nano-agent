@@ -134,3 +134,21 @@ class UIMessage:
     def is_frozen(self) -> bool:
         """Check if this message is frozen (cannot be modified)."""
         return self.status == MessageStatus.COMPLETE
+
+    def visual_line_count(self) -> int:
+        """Count the number of visual lines this message will render as.
+
+        Each RenderItem produces at least 1 line, but content with embedded
+        newlines produces multiple lines.
+        """
+        count = 0
+        for item in self.output_buffer:
+            content = item.content
+            if isinstance(content, str):
+                # String: count newlines + 1
+                count += content.count("\n") + 1
+            else:
+                # Rich renderable (e.g., Text): convert to string and count
+                text = str(content)
+                count += text.count("\n") + 1
+        return count

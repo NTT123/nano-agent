@@ -1,16 +1,35 @@
 """Unified terminal footer with content area and status bar.
 
 This module provides:
+- FooterState: Enum for footer display states
 - StatusBarState: Dataclass holding status bar values
 - TerminalFooter: Unified footer with content + status bar rendering
 """
 
 from __future__ import annotations
 
-import shutil
+import threading
 from dataclasses import dataclass, field
+from enum import Enum, auto
+from typing import Callable
 
 from .terminal import ANSI, TerminalRegion
+
+
+class FooterState(Enum):
+    """Footer display states with explicit values.
+
+    Valid transitions:
+        INACTIVE ──activate()──> ACTIVE
+        ACTIVE ──deactivate()──> INACTIVE
+        ACTIVE ──pause()──> PAUSED
+        PAUSED ──resume()──> ACTIVE
+        PAUSED ──deactivate()──> INACTIVE
+    """
+
+    INACTIVE = auto()  # Not rendered, no terminal region reserved
+    ACTIVE = auto()  # Fully active, rendering content + status bar
+    PAUSED = auto()  # Temporarily hidden for console output
 
 
 @dataclass
@@ -50,9 +69,63 @@ class TerminalFooter:
 
     def __init__(self) -> None:
         self._region = TerminalRegion()
-        self._state: str = "inactive"  # inactive | active | paused
+        self._state: FooterState = FooterState.INACTIVE
         self._content_lines: list[str] = []
         self._status = StatusBarState()
+        # Lock to prevent concurrent render operations and state transitions
+        # (e.g., _refresh_loop and input handling both calling render())
+        self._render_lock = threading.Lock()
+
+    # Valid state transitions
+    _VALID_TRANSITIONS: dict[FooterState, set[FooterState]] = {
+        FooterState.INACTIVE: {FooterState.ACTIVE},
+        FooterState.ACTIVE: {FooterState.INACTIVE, FooterState.PAUSED},
+        FooterState.PAUSED: {FooterState.ACTIVE, FooterState.INACTIVE},
+    }
+
+    def _can_transition_to(self, new_state: FooterState) -> bool:
+        """Check if transition to new_state is valid from current state."""
+        return new_state in self._VALID_TRANSITIONS.get(self._state, set())
+
+    def _transition_to(self, new_state: FooterState) -> bool:
+        """Attempt state transition. Returns True if successful.
+
+        Must be called while holding _render_lock.
+        """
+        if self._state == new_state:
+            return True  # Already in target state
+        if not self._can_transition_to(new_state):
+            return False
+        self._state = new_state
+        return True
+
+    def _assert_invariants(self) -> None:
+        """Assert state invariants (for debugging).
+
+        Call after transitions to verify state consistency.
+        Raises AssertionError if invariants are violated.
+
+        Invariants:
+        - INACTIVE: content empty, region inactive
+        - ACTIVE: region active, region.num_lines == len(content) + 1
+        - PAUSED: region inactive, content may be preserved
+        """
+        if self._state == FooterState.INACTIVE:
+            assert (
+                not self._content_lines
+            ), f"Content should be empty when inactive, got {len(self._content_lines)} lines"
+            assert (
+                not self._region._active
+            ), "Region should be inactive when footer inactive"
+        elif self._state == FooterState.ACTIVE:
+            assert self._region._active, "Region should be active when footer active"
+            expected_lines = len(self._content_lines) + 1  # +1 for status bar
+            assert (
+                self._region.num_lines == expected_lines
+            ), f"Region lines {self._region.num_lines} != expected {expected_lines}"
+        elif self._state == FooterState.PAUSED:
+            assert not self._region._active, "Region should be inactive when paused"
+            # Note: content_lines may be preserved when paused (for resume)
 
     @property
     def status(self) -> StatusBarState:
@@ -66,13 +139,13 @@ class TerminalFooter:
         # Activity with spinner (if active)
         if self._status.activity:
             spinner = self._status.get_spinner_char()
-            parts.append(f"{spinner} \033[36m{self._status.activity}\033[0m")
+            parts.append(f"{spinner} {ANSI.CYAN}{self._status.activity}{ANSI.RESET}")
 
         # Auto-accept status
         if self._status.auto_accept:
-            parts.append("\033[32mAuto-accept: ON\033[0m")
+            parts.append(f"{ANSI.GREEN}Auto-accept: ON{ANSI.RESET}")
         else:
-            parts.append("\033[2mAuto-accept: off\033[0m")
+            parts.append(f"{ANSI.DIM}Auto-accept: off{ANSI.RESET}")
 
         # Token stats
         total_tokens = (
@@ -81,21 +154,20 @@ class TerminalFooter:
             + self._status.thinking_tokens
         )
         parts.append(
-            f"\033[2mTokens (last): {total_tokens:,} "
+            f"{ANSI.DIM}Tokens (last): {total_tokens:,} "
             f"= {self._status.input_tokens:,}↓ "
             f"{self._status.output_tokens:,}↑ "
-            f"{self._status.thinking_tokens:,}t\033[0m"
+            f"{self._status.thinking_tokens:,}t{ANSI.RESET}"
         )
 
         # Escape hint when activity is shown
         if self._status.activity:
-            parts.append("\033[2m(Esc to cancel)\033[0m")
+            parts.append(f"{ANSI.DIM}(Esc to cancel){ANSI.RESET}")
 
         line = " • ".join(parts)
 
         # Truncate to terminal width
-        terminal_width = shutil.get_terminal_size().columns
-        return ANSI.truncate_to_width(line, terminal_width)
+        return ANSI.truncate_to_width(line, ANSI.get_terminal_width())
 
     def _get_all_lines(self) -> list[str]:
         """Get all lines to render (content + status bar)."""
@@ -111,46 +183,164 @@ class TerminalFooter:
         self._region.render(lines)
 
     def activate(self) -> None:
-        """Activate the footer and reserve terminal region."""
-        if self._state == "active":
-            return
-        if self._state == "paused":
-            self.resume()
-            return
+        """Activate the footer and reserve terminal region.
 
-        self._state = "active"
-        # Start with just status bar (1 line)
+        Thread-safe: uses lock to prevent race conditions.
+        """
+        with self._render_lock:
+            if self._state == FooterState.ACTIVE:
+                return
+            if self._state == FooterState.PAUSED:
+                self._do_resume()
+                return
+            self._do_activate()
+
+    def _do_activate(self) -> None:
+        """Internal activate (must hold lock)."""
+        self._transition_to(FooterState.ACTIVE)
         lines = self._get_all_lines()
         self._region.activate(len(lines))
         self._render_lines(lines)
 
     def deactivate(self) -> None:
-        """Deactivate the footer and release terminal region."""
-        if self._state == "inactive":
-            return
+        """Deactivate the footer and release terminal region.
 
+        Thread-safe: uses lock to prevent race conditions.
+        """
+        with self._render_lock:
+            if self._state == FooterState.INACTIVE:
+                return
+            self._do_deactivate()
+
+    def _do_deactivate(self) -> None:
+        """Internal deactivate (must hold lock)."""
         self._region.deactivate()
-        self._state = "inactive"
+        self._transition_to(FooterState.INACTIVE)
         self._content_lines = []
 
     def render(self) -> None:
-        """Render current content + status bar."""
-        if self._state != "active":
-            return
+        """Render current content + status bar.
 
-        self._render_lines(self._get_all_lines())
+        Thread-safe: uses lock to prevent concurrent render operations
+        from corrupting terminal output.
+        """
+        with self._render_lock:
+            if self._state != FooterState.ACTIVE:
+                return
+            self._render_lines(self._get_all_lines())
 
     def set_content(self, lines: list[str]) -> None:
-        """Set the content area lines (above status bar)."""
-        self._content_lines = list(lines)
-        if self._state == "active":
-            self.render()
+        """Set the content area lines (above status bar).
+
+        Thread-safe: uses lock to prevent race conditions.
+        """
+        with self._render_lock:
+            self._content_lines = list(lines)
+            if self._state == FooterState.ACTIVE:
+                self._render_lines(self._get_all_lines())
 
     def clear_content(self) -> None:
-        """Clear content area, keep status bar visible."""
+        """Clear content area, keep status bar visible.
+
+        Thread-safe: uses lock to prevent race conditions.
+        """
+        with self._render_lock:
+            self._content_lines = []
+            if self._state == FooterState.ACTIVE:
+                self._render_lines(self._get_all_lines())
+
+    def overwrite_content_with_message(self) -> int:
+        """Prepare to overwrite content area with a message.
+
+        Moves cursor to start of content area so caller can print directly
+        over the existing content. Returns number of content lines.
+
+        After printing, caller should call finish_content_overwrite().
+        """
+        if self._state != FooterState.ACTIVE:
+            return 0
+
+        # Move cursor to top of region (content starts there)
+        self._region._move_to_region_start()
+
+        # Return number of content lines for caller to know
+        return len(self._content_lines)
+
+    def finish_content_overwrite(self, lines_printed: int) -> None:
+        """Complete the overwrite transition after printing message.
+
+        Clears any extra lines if old content was taller than new,
+        then resizes region to just status bar.
+        """
+        if self._state != FooterState.ACTIVE:
+            return
+
+        old_content_lines = len(self._content_lines)
+
+        # If we printed fewer lines than old content, clear the extras
+        if lines_printed < old_content_lines:
+            # Move to the line after what was printed
+            lines_to_clear = old_content_lines - lines_printed
+            for i in range(lines_to_clear):
+                ANSI.clear_line()
+                if i < lines_to_clear - 1:
+                    ANSI.move_down(1)
+
+        # Clear content state
         self._content_lines = []
-        if self._state == "active":
-            self.render()
+
+        # Resize region to just status bar (1 line)
+        # The cursor is currently somewhere after printed content
+        # We need to position for just the status bar
+        self._region.num_lines = 1
+        self._region._cursor_at_line = 0
+
+        # Render the status bar
+        self.render()
+
+    def transition_to_message(self, render_callback: Callable[[], int]) -> None:
+        """Atomically transition from input content to rendered message.
+
+        This is the seamless transition path: instead of pause/resume which
+        causes visual flicker, we overwrite the footer content in place with
+        the rendered message.
+
+        Args:
+            render_callback: Function that renders content and returns lines printed
+        """
+        if self._state != FooterState.ACTIVE or not self._content_lines:
+            # Normal path - use pause/resume
+            self._region.deactivate()
+            render_callback()
+            self._region.activate(1)
+            self._render_lines(self._get_all_lines())
+            self._state = FooterState.ACTIVE
+            return
+
+        # Seamless path: overwrite content in place
+        old_count = len(self._content_lines)
+
+        # Move cursor to top of region (content starts there)
+        self._region.move_to_start()
+
+        # Render the message
+        lines_printed = render_callback()
+
+        # Clear extra lines if old content was taller than new
+        if lines_printed < old_count:
+            lines_to_clear = old_count - lines_printed
+            for i in range(lines_to_clear):
+                ANSI.clear_line()
+                if i < lines_to_clear - 1:
+                    ANSI.move_down(1)
+
+        # Reset footer state
+        self._content_lines = []
+        self._region.num_lines = 1
+        self._region._cursor_at_line = 0
+
+        # Render status bar
+        self.render()
 
     def update_status(
         self,
@@ -159,27 +349,50 @@ class TerminalFooter:
         output_tokens: int | None = None,
         thinking_tokens: int | None = None,
     ) -> None:
-        """Update status bar values and re-render."""
-        if auto_accept is not None:
-            self._status.auto_accept = auto_accept
-        if input_tokens is not None:
-            self._status.input_tokens = input_tokens
-        if output_tokens is not None:
-            self._status.output_tokens = output_tokens
-        if thinking_tokens is not None:
-            self._status.thinking_tokens = thinking_tokens
-        if self._state == "active":
-            self.render()
+        """Update status bar values and re-render.
+
+        Thread-safe: uses lock to prevent race conditions.
+        """
+        with self._render_lock:
+            if auto_accept is not None:
+                self._status.auto_accept = auto_accept
+            if input_tokens is not None:
+                self._status.input_tokens = input_tokens
+            if output_tokens is not None:
+                self._status.output_tokens = output_tokens
+            if thinking_tokens is not None:
+                self._status.thinking_tokens = thinking_tokens
+            if self._state == FooterState.ACTIVE:
+                self._render_lines(self._get_all_lines())
 
     def set_activity(self, activity: str | None) -> None:
-        """Set activity text (shows spinner when not None)."""
-        self._status.activity = activity
-        if self._state == "active":
-            self.render()
+        """Set activity text (shows spinner when not None).
+
+        Thread-safe: uses lock to prevent race conditions.
+        """
+        with self._render_lock:
+            self._status.activity = activity
+            if self._state == FooterState.ACTIVE:
+                self._render_lines(self._get_all_lines())
 
     def is_active(self) -> bool:
         """Check if footer is currently active."""
-        return self._state == "active"
+        return self._state == FooterState.ACTIVE
+
+    def is_paused(self) -> bool:
+        """Check if footer is currently paused."""
+        return self._state == FooterState.PAUSED
+
+    def has_content(self) -> bool:
+        """Check if footer has content lines."""
+        return bool(self._content_lines)
+
+    def get_state(self) -> str:
+        """Get current footer state as string (backward compatible).
+
+        Returns lowercase state name: 'inactive', 'active', or 'paused'.
+        """
+        return self._state.name.lower()
 
     def pause(self) -> None:
         """Temporarily hide the footer to allow normal printing.
@@ -187,37 +400,49 @@ class TerminalFooter:
         Call this before using console.print() or other output.
         The footer region is cleared and cursor is positioned for normal output.
         Call resume() after printing to restore the footer.
-        """
-        if self._state != "active":
-            return
 
-        # Clear the region and show cursor for normal output.
+        Thread-safe: uses lock to prevent race conditions.
+        """
+        with self._render_lock:
+            if self._state != FooterState.ACTIVE:
+                return
+            self._do_pause()
+
+    def _do_pause(self) -> None:
+        """Internal pause (must hold lock)."""
         self._region.deactivate()
-        self._state = "paused"
+        self._transition_to(FooterState.PAUSED)
 
     def resume(self) -> None:
         """Restore the footer after pause().
 
         Call this after console.print() to show the footer again at the
         new cursor position.
-        """
-        if self._state != "paused":
-            return
 
-        # Re-activate at current cursor position
+        Thread-safe: uses lock to prevent race conditions.
+        """
+        with self._render_lock:
+            if self._state != FooterState.PAUSED:
+                return
+            self._do_resume()
+
+    def _do_resume(self) -> None:
+        """Internal resume (must hold lock)."""
         lines = self._get_all_lines()
         self._region.activate(len(lines))
         self._region.render(lines)
-        self._state = "active"
+        self._transition_to(FooterState.ACTIVE)
 
     def resync_position(self) -> None:
         """Re-sync the footer position after external content is printed.
 
         This is a convenience method that pauses and resumes the footer.
         Call this after using console.print() while the footer is active.
-        """
-        if self._state != "active":
-            return
 
-        self.pause()
-        self.resume()
+        Thread-safe: uses lock to prevent race conditions.
+        """
+        with self._render_lock:
+            if self._state != FooterState.ACTIVE:
+                return
+            self._do_pause()
+            self._do_resume()

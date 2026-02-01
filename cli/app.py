@@ -24,9 +24,12 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum, auto
 from pathlib import Path
+from typing import AsyncIterator
 
 from rich.console import Console, RenderableType
 from rich.panel import Panel
@@ -88,6 +91,40 @@ from .message_factory import (
 from .message_list import MessageList
 from .messages import UIMessage
 from .session import SessionStore
+
+
+class AppState(Enum):
+    """Application lifecycle states for documentation and debugging.
+
+    This enum tracks the high-level state of the CLI application.
+    Used for logging/debugging only - no transition validation performed.
+
+    State Diagram:
+        INIT ──► IDLE ◄──► COMMAND
+                  │
+                  ▼
+              THINKING ◄───┐
+                  │        │
+                  ▼        │
+            EXECUTING_TOOL─┘
+                  │
+                  ▼
+            AWAITING_USER ──► CANCELLATION
+                                   │
+                                   ▼
+                               (back to IDLE or EXECUTING_TOOL)
+
+        Any state ──► SHUTDOWN (on exit)
+    """
+
+    INIT = auto()  # App starting, API initialization
+    IDLE = auto()  # Awaiting user input
+    COMMAND = auto()  # Processing slash command
+    THINKING = auto()  # API call in progress
+    EXECUTING_TOOL = auto()  # Tool execution in progress
+    AWAITING_USER = auto()  # Waiting for user response (confirm/select)
+    CANCELLATION = auto()  # Showing cancellation menu
+    SHUTDOWN = auto()  # Cleanup and exit
 
 
 async def build_system_prompt_async(model: str) -> tuple[str, bool]:
@@ -180,6 +217,8 @@ class TerminalApp:
     _execution_task: asyncio.Task[None] | None = field(
         default=None, init=False, repr=False
     )
+    # App state tracking (for debugging/logging)
+    _state: AppState = field(default=AppState.INIT, init=False, repr=False)
 
     def __post_init__(self) -> None:
         """Initialize tools after dataclass creation."""
@@ -202,6 +241,40 @@ class TerminalApp:
         self.input_controller.on_escape = self._on_escape_pressed
         # Initialize input controller with Shift+Tab -> toggle auto-accept binding
         self.input_controller.on_toggle_auto_accept = self._toggle_auto_accept
+
+    def _set_state(self, state: AppState) -> None:
+        """Update app state (for debugging/logging).
+
+        This is informational only - no validation or side effects.
+        Enable debug logging to see state transitions.
+        """
+        self._state = state
+
+    def get_state(self) -> AppState:
+        """Get current app state."""
+        return self._state
+
+    @asynccontextmanager
+    async def _state_activity(
+        self, state: AppState, activity: str
+    ) -> AsyncIterator[None]:
+        """Context manager for state + activity updates.
+
+        Sets state and activity on entry, clears activity on exit.
+        Reduces boilerplate for the common pattern of:
+            self._set_state(state)
+            await self.input_controller.set_activity(activity)
+            try:
+                ...
+            finally:
+                await self.input_controller.set_activity(None)
+        """
+        self._set_state(state)
+        await self.input_controller.set_activity(activity)
+        try:
+            yield
+        finally:
+            await self.input_controller.set_activity(None)
 
     def _on_escape_pressed(self) -> None:
         """Called when Escape key is pressed during agent execution."""
@@ -241,11 +314,22 @@ class TerminalApp:
             The added message
         """
         self.message_list.add(msg)
-        # Pause footer before printing to avoid overlap
-        self.input_controller.pause_footer()
-        self.message_list.render_message(msg, self.console)
-        # Resume footer at new position after printing
-        self.input_controller.resume_footer()
+
+        # Use unified transition API - handles seamless overwrite when appropriate
+        if (
+            msg.message_type == "user"
+            and self.input_controller.has_overwritable_content()
+        ):
+            # Seamless transition: overwrite footer content in place
+            self.input_controller.transition_to_message(
+                lambda: self.message_list.render_message(msg, self.console)
+            )
+        else:
+            # Normal path: pause, render, resume
+            self.input_controller.pause_footer()
+            self.message_list.render_message(msg, self.console)
+            self.input_controller.resume_footer()
+
         return msg
 
     def print_history(self, content: Text | Panel | RenderableType | str) -> None:
@@ -570,13 +654,16 @@ class TerminalApp:
 
         # Pause escape listener to avoid competing raw readers during prompt
         was_running = self.input_controller.is_running()
+        prev_state = self._state
         if was_running:
             await self.input_controller.stop()
         try:
+            self._set_state(AppState.AWAITING_USER)
             result = await self.input_controller.confirm(
                 message=f"Allow edit to {file_path}?"
             )
         finally:
+            self._set_state(prev_state)
             if was_running:
                 await self.input_controller.start()
 
@@ -644,9 +731,11 @@ class TerminalApp:
 
             # Pause escape listener to avoid competing raw readers during prompt
             was_running = self.input_controller.is_running()
+            prev_state = self._state
             if was_running:
                 await self.input_controller.stop()
             try:
+                self._set_state(AppState.AWAITING_USER)
                 selection = await self.input_controller.select(
                     title=question.question,
                     options=options,
@@ -729,6 +818,7 @@ class TerminalApp:
                             selected = custom_text
                     result_text = selected
             finally:
+                self._set_state(prev_state)
                 if was_running:
                     await self.input_controller.start()
 
@@ -831,12 +921,12 @@ class TerminalApp:
             return
 
         # Show activity in footer status bar
-        self.input_controller.set_activity(f"Running {tool_call.name}...")
+        await self.input_controller.set_activity(f"Running {tool_call.name}...")
         escape_task = asyncio.create_task(self._check_for_escape())
         try:
             await self._execute_tool(tool_call)
         finally:
-            self.input_controller.set_activity(None)
+            await self.input_controller.set_activity(None)
             escape_task.cancel()
             try:
                 await escape_task
@@ -877,7 +967,7 @@ class TerminalApp:
             batch.mark_running(i)
 
             # Show activity in footer
-            self.input_controller.set_activity(f"Running {tool_call.name}...")
+            await self.input_controller.set_activity(f"Running {tool_call.name}...")
             escape_task = asyncio.create_task(self._check_for_escape())
 
             try:
@@ -889,7 +979,7 @@ class TerminalApp:
                 batch.mark_cancelled(i)
 
                 # Stop escape polling
-                self.input_controller.set_activity(None)
+                await self.input_controller.set_activity(None)
                 escape_task.cancel()
                 try:
                     await escape_task
@@ -900,7 +990,9 @@ class TerminalApp:
                 self.cancel_token.reset()
 
                 # Show cancellation menu and get user choice
+                self._set_state(AppState.CANCELLATION)
                 choice = await self.input_controller.show_cancellation_menu(batch)
+                self._set_state(AppState.EXECUTING_TOOL)
 
                 if choice == CancellationChoice.RETRY:
                     # Re-execute the same tool (don't increment i)
@@ -952,7 +1044,7 @@ class TerminalApp:
                     return False
 
             finally:
-                self.input_controller.set_activity(None)
+                await self.input_controller.set_activity(None)
                 if not escape_task.done():
                     escape_task.cancel()
                     try:
@@ -1055,13 +1147,12 @@ class TerminalApp:
             # CHECKPOINT: Save DAG state before API call for potential rollback
             checkpoint = self.dag
 
-            # Show activity in footer
-            self.input_controller.set_activity("Thinking...")
+            # API call with activity indicator and escape detection
             escape_task = asyncio.create_task(self._check_for_escape())
             try:
-                response = await self.cancel_token.run(self.api.send(self.dag))
+                async with self._state_activity(AppState.THINKING, "Thinking..."):
+                    response = await self.cancel_token.run(self.api.send(self.dag))
             finally:
-                self.input_controller.set_activity(None)
                 escape_task.cancel()
                 try:
                     await escape_task
@@ -1075,9 +1166,11 @@ class TerminalApp:
             # Check for tool calls
             tool_calls = response.get_tool_use()
             if not tool_calls:
+                self._set_state(AppState.IDLE)
                 break
 
             # Execute tools with tracking (handles cancellation and user choices)
+            self._set_state(AppState.EXECUTING_TOOL)
             completed = await self._execute_tools_with_tracking(tool_calls, checkpoint)
 
             # If user chose to undo all, exit loop - they need to provide new input
@@ -1108,13 +1201,12 @@ class TerminalApp:
                 # CHECKPOINT: Save DAG state before API call for potential rollback
                 checkpoint = self.dag
 
-                # API call with footer status bar, polling for Escape in background
-                self.input_controller.set_activity("Thinking...")
+                # API call with activity indicator and escape detection
                 escape_task = asyncio.create_task(self._check_for_escape())
                 try:
-                    response = await self.cancel_token.run(self.api.send(self.dag))
+                    async with self._state_activity(AppState.THINKING, "Thinking..."):
+                        response = await self.cancel_token.run(self.api.send(self.dag))
                 finally:
-                    self.input_controller.set_activity(None)
                     escape_task.cancel()
                     try:
                         await escape_task
@@ -1128,17 +1220,17 @@ class TerminalApp:
                 # Check for tool calls
                 tool_calls = response.get_tool_use()
                 if not tool_calls:
+                    self._set_state(AppState.IDLE)
                     break
 
                 # Execute tools with tracking (handles cancellation and user choices)
+                self._set_state(AppState.EXECUTING_TOOL)
                 completed = await self._execute_tools_with_tracking(
                     tool_calls, checkpoint
                 )
 
-                # If user chose to undo all, the loop will continue with rolled-back DAG
-                # The next iteration will make a new API call with the clean state
+                # If user chose to undo all, exit loop - they need to provide new input
                 if not completed:
-                    # User rolled back - exit loop, they need to provide new input
                     break
 
     async def _run_agent_with_error_handling(self) -> None:
@@ -1295,6 +1387,7 @@ class TerminalApp:
                     )
 
             # Main input loop (prompt only when execution is idle)
+            self._set_state(AppState.IDLE)
             while True:
                 # If there's a pending execution and it's done, clean up
                 if self._execution_task is not None and self._execution_task.done():
@@ -1314,6 +1407,7 @@ class TerminalApp:
                 if user_input is None:
                     # User pressed Ctrl+D - wait for execution to finish first
                     await self._wait_for_execution()
+                    self._set_state(AppState.SHUTDOWN)
                     self.print_blank()
                     self.add_message(create_system_message("Goodbye!"))
                     break
@@ -1332,9 +1426,12 @@ class TerminalApp:
                 # Handle slash commands - wait for execution first
                 if user_input.startswith("/"):
                     await self._wait_for_execution()
+                    self._set_state(AppState.COMMAND)
                     if not await self.handle_command(user_input):
+                        self._set_state(AppState.SHUTDOWN)
                         self.add_message(create_system_message("Goodbye!"))
                         break
+                    self._set_state(AppState.IDLE)
                     continue
 
                 # Queue message for processing

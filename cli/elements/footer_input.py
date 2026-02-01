@@ -9,7 +9,6 @@ This module provides FooterInput - a multiline text prompt with:
 from __future__ import annotations
 
 import os
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -66,6 +65,10 @@ class FooterInput(ActiveElement[str | None]):
         # History is saved per-submission, not on deactivate
         pass
 
+    def completion_delay(self) -> float:
+        """No delay for text input - user already sees their input."""
+        return 0.0
+
     def _load_history(self) -> None:
         """Load history from file."""
         if not self.history_file:
@@ -114,7 +117,17 @@ class FooterInput(ActiveElement[str | None]):
         self.cursor_pos += len(text)
 
     def _normalize_paste(self, text: str) -> str:
+        """Normalize pasted text for insertion.
+
+        Handles:
+        - Line ending normalization (CRLF, CR -> LF)
+        - Multiline restriction if disabled
+        - Tab expansion (tabs display as variable width, convert to spaces)
+        """
         normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+        # Expand tabs to 4 spaces (tabs cause cursor positioning issues
+        # since they count as 1 char but display as variable width)
+        normalized = normalized.replace("\t", "    ")
         if not self.allow_multiline:
             normalized = normalized.replace("\n", " ")
         return normalized
@@ -167,54 +180,74 @@ class FooterInput(ActiveElement[str | None]):
             self.buffer = self._temp_buffer
             self.cursor_pos = len(self.buffer)
 
-    def get_lines(self) -> list[str]:
-        """Get lines for rendering in footer content area."""
-        terminal_width = shutil.get_terminal_size().columns
-        prompt_width = len(self.prompt)  # Visual width of prompt (no ANSI codes)
+    def _can_move_left(self) -> bool:
+        """Check if cursor can move left."""
+        return self.cursor_pos > 0
 
-        # Use ANSI reverse video for cursor (shows character in inverted colors)
-        REVERSE = "\033[7m"
-        RESET = "\033[0m"
+    def _can_move_right(self) -> bool:
+        """Check if cursor can move right."""
+        return self.cursor_pos < len(self.buffer)
 
+    def _move_cursor_left(self) -> None:
+        """Move cursor left by one position if possible."""
+        if self._can_move_left():
+            self.cursor_pos -= 1
+
+    def _move_cursor_right(self) -> None:
+        """Move cursor right by one position if possible."""
+        if self._can_move_right():
+            self.cursor_pos += 1
+
+    def _render_buffer_with_cursor(self) -> str:
+        """Return buffer string with cursor position highlighted in reverse video."""
         if self.cursor_pos < len(self.buffer):
             # Cursor within text - show character at cursor in reverse video
             char_at_cursor = self.buffer[self.cursor_pos]
-            display = (
+            return (
                 self.buffer[: self.cursor_pos]
-                + REVERSE
+                + ANSI.REVERSE
                 + char_at_cursor
-                + RESET
+                + ANSI.RESET
                 + self.buffer[self.cursor_pos + 1 :]
             )
-        else:
-            # Cursor at end - show space in reverse video
-            display = self.buffer + REVERSE + self.cursor_char + RESET
+        # Cursor at end - show space in reverse video
+        return self.buffer + ANSI.REVERSE + self.cursor_char + ANSI.RESET
+
+    def get_lines(self) -> list[str]:
+        """Get lines for rendering in footer content area."""
+        terminal_width = ANSI.get_terminal_width()
+        prompt_width = len(self.prompt)  # Visual width of prompt (no ANSI codes)
+
+        display = self._render_buffer_with_cursor()
 
         # Split by logical newlines first
         logical_lines = display.split("\n")
 
         result = []
         for idx, logical_line in enumerate(logical_lines):
-            # First logical line gets prompt, others get indent
             if idx == 0:
-                prefix = self.prompt
-                available_width = terminal_width - prompt_width
+                # First logical line: prompt prefix, wrap to fit
+                # Guard against negative width on very narrow terminals
+                first_width = max(1, terminal_width - prompt_width)
+                first_wrapped = ANSI.wrap_to_width(logical_line, first_width)
+
+                if first_wrapped:
+                    result.append(self.prompt + first_wrapped[0])
+
+                    # Continuation of first line uses full width (no prefix)
+                    if len(first_wrapped) > 1:
+                        remaining = "".join(first_wrapped[1:])
+                        continuation_wrapped = ANSI.wrap_to_width(
+                            remaining, max(1, terminal_width)
+                        )
+                        result.extend(continuation_wrapped)
             else:
-                prefix = " " * prompt_width
-                available_width = terminal_width - prompt_width
-
-            # Wrap the logical line
-            wrapped = ANSI.wrap_to_width(logical_line, available_width)
-
-            for wrap_idx, visual_line in enumerate(wrapped):
-                if wrap_idx == 0:
-                    result.append(prefix + visual_line)
-                else:
-                    # Continuation of wrapped line gets same indent
-                    result.append(" " * prompt_width + visual_line)
+                # Subsequent logical lines (from explicit newlines): no prefix, full width
+                wrapped = ANSI.wrap_to_width(logical_line, max(1, terminal_width))
+                result.extend(wrapped)
 
         if not result:
-            return [self.prompt + REVERSE + self.cursor_char + RESET]
+            return [self.prompt + ANSI.REVERSE + self.cursor_char + ANSI.RESET]
 
         return result
 
@@ -271,12 +304,10 @@ class FooterInput(ActiveElement[str | None]):
             self.cursor_pos = len(self.buffer)
             return (False, None)
         if event.ctrl and event.char == "b":
-            if self.cursor_pos > 0:
-                self.cursor_pos -= 1
+            self._move_cursor_left()
             return (False, None)
         if event.ctrl and event.char == "f":
-            if self.cursor_pos < len(self.buffer):
-                self.cursor_pos += 1
+            self._move_cursor_right()
             return (False, None)
 
         # Editing
@@ -321,12 +352,10 @@ class FooterInput(ActiveElement[str | None]):
 
         # Arrow keys
         if event.key == "Left":
-            if self.cursor_pos > 0:
-                self.cursor_pos -= 1
+            self._move_cursor_left()
             return (False, None)
         if event.key == "Right":
-            if self.cursor_pos < len(self.buffer):
-                self.cursor_pos += 1
+            self._move_cursor_right()
             return (False, None)
 
         # Printable characters

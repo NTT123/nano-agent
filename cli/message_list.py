@@ -9,6 +9,7 @@ The message list is the source of truth for UI rendering:
 
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass, field
 from typing import Iterator
 
@@ -88,18 +89,30 @@ class MessageList:
             return Text(item.content)
         return item.content
 
-    def render_message(self, msg: UIMessage, console: Console) -> None:
+    def render_message(self, msg: UIMessage, console: Console) -> int:
         """Render a single message to the console.
 
         Args:
             msg: The message to render
             console: The Rich console to render to
+
+        Returns:
+            Number of lines printed
         """
+        total_lines = 0
         for item in msg.output_buffer:
-            # Ensure we start at column 1 (avoid inherited cursor offsets)
-            console.print("\r", end="")
             renderable = self.render_item(item)
-            console.print(renderable)
+            # Print with clear-to-end to avoid artifacts
+            console.print(renderable, end="")
+            sys.stdout.write("\033[K\n")  # Clear to EOL + newline
+            sys.stdout.flush()
+            # Count lines in this item
+            content = item.content
+            if isinstance(content, str):
+                total_lines += content.count("\n") + 1
+            else:
+                total_lines += str(content).count("\n") + 1
+        return total_lines
 
     def render_all(self, console: Console) -> None:
         """Render all messages to the console.

@@ -65,3 +65,11 @@ class ActiveElement(ABC, Generic[T]):
     def on_deactivate(self) -> None:
         """Called when element completes."""
         pass
+
+    def completion_delay(self) -> float:
+        """Delay in seconds after completion before returning.
+
+        Override in subclasses. Default is 0.15s for visual feedback
+        on confirmations and menus. Text input should return 0.0.
+        """
+        return 0.15

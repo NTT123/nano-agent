@@ -43,6 +43,9 @@ class InputController:
     _refresh_task: asyncio.Task[None] | None = field(
         default=None, init=False, repr=False
     )
+    _task_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock, init=False, repr=False
+    )
 
     def __post_init__(self) -> None:
         """Initialize the footer element manager."""
@@ -111,7 +114,12 @@ class InputController:
         if not self._running or not self._reader:
             return
         loop = asyncio.get_event_loop()
-        event = await loop.run_in_executor(None, self._reader.read_nonblocking, timeout)
+        try:
+            event = await loop.run_in_executor(
+                None, self._reader.read_nonblocking, timeout
+            )
+        except (OSError, ValueError):
+            return  # Reader was stopped or fd invalid
         if event:
             if event.key == "Escape":
                 if self.on_escape:
@@ -138,7 +146,7 @@ class InputController:
             thinking_tokens=thinking_tokens,
         )
 
-    def set_activity(self, activity: str | None) -> None:
+    async def set_activity(self, activity: str | None) -> None:
         """Set activity text (shows spinner when not None).
 
         When activity is set:
@@ -148,13 +156,16 @@ class InputController:
         When activity is None:
         - No spinner
         - Just status bar with auto-accept and token counts
+
+        Uses _task_lock to protect against concurrent task management.
         """
         self.footer.set_activity(activity)
-        # Start/stop refresh task for spinner animation
-        if activity and (self._refresh_task is None or self._refresh_task.done()):
-            self._refresh_task = asyncio.create_task(self._refresh_loop())
-        elif not activity and self._refresh_task and not self._refresh_task.done():
-            self._refresh_task.cancel()
+        # Start/stop refresh task for spinner animation (protected by lock)
+        async with self._task_lock:
+            if activity and (self._refresh_task is None or self._refresh_task.done()):
+                self._refresh_task = asyncio.create_task(self._refresh_loop())
+            elif not activity and self._refresh_task and not self._refresh_task.done():
+                self._refresh_task.cancel()
 
     def resync_footer(self) -> None:
         """Re-sync footer position after external content is printed.
@@ -176,8 +187,37 @@ class InputController:
         """Restore footer after pause_footer()."""
         self.footer.resume()
 
+    def has_overwritable_content(self) -> bool:
+        """Check if footer has content that can be overwritten."""
+        return self.footer.has_content() and self.footer.is_active()
+
+    def prepare_content_overwrite(self) -> int:
+        """Prepare to overwrite footer content. Returns line count."""
+        return self.footer.overwrite_content_with_message()
+
+    def finish_content_overwrite(self, lines_printed: int) -> None:
+        """Complete the overwrite transition."""
+        self.footer.finish_content_overwrite(lines_printed)
+
+    def transition_to_message(self, render_callback: Callable[[], int]) -> None:
+        """Atomically transition from input content to rendered message.
+
+        This is the preferred API for seamless user input -> message transition.
+        The render_callback should render content and return the number of lines printed.
+
+        Args:
+            render_callback: Function that renders content and returns lines printed
+        """
+        self.footer.transition_to_message(render_callback)
+
     async def prompt_text(self, prompt: str = "> ") -> str | None:
-        """Prompt for user text input using FooterInput."""
+        """Prompt for user text input using FooterInput.
+
+        Note: This method temporarily pauses the raw input reader to avoid
+        conflicts with FooterInput's own input handling. The reader is
+        restarted in the finally block. The `_running` flag remains True
+        because this is a temporary pause, not a full stop.
+        """
         try:
             # Stop raw reader while FooterInput handles input
             was_running = self._running

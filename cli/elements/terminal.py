@@ -13,11 +13,14 @@ import fcntl
 import os
 import re
 import select
+import shutil
 import sys
 import termios
 import time
 import tty
 from typing import Any
+
+import wcwidth
 
 from .base import InputEvent
 
@@ -61,6 +64,7 @@ class ANSI:
 
     # Line control
     CLEAR_LINE = "\033[2K"
+    CLEAR_TO_END = "\033[K"  # Erase from cursor to end of line
     CARRIAGE_RETURN = "\r"
     ENABLE_BRACKETED_PASTE = "\033[?2004h"
     DISABLE_BRACKETED_PASTE = "\033[?2004l"
@@ -76,6 +80,15 @@ class ANSI:
 
     # Pattern to match ANSI escape sequences (for stripping)
     _ANSI_PATTERN = re.compile(r"\033\[[0-9;]*m")
+
+    # CSI (Control Sequence Introducer) final bytes range from 0x40-0x7E
+    # This includes A-Z, a-z, and symbols like @[\]^_`{|}~
+    # Common terminators: m (SGR), H/f (cursor pos), J/K (erase),
+    # A/B/C/D (cursor move), s/u (save/restore), h/l (mode), r (scroll region)
+    _CSI_TERMINATORS = frozenset("ABCDEFGHJKLMPSTXZfhlmnqrsu@`{|}~[\\]^_")
+
+    # Style codes for common text effects
+    REVERSE = "\033[7m"  # Inverse/reverse video
 
     # Terminal capability detection (cached)
     _osc_1337_supported: bool | None = None
@@ -102,14 +115,59 @@ class ANSI:
         return f"\033[{n}D" if n > 0 else ""
 
     @classmethod
+    def get_terminal_width(cls) -> int:
+        """Get current terminal width in columns."""
+        return shutil.get_terminal_size().columns
+
+    @classmethod
+    def _get_char_width(cls, char: str) -> int:
+        """Get visual width of character (0 for control, 1-2 for normal).
+
+        Uses wcwidth for proper handling of:
+        - Wide characters (CJK, emoji): return 2
+        - Normal characters: return 1
+        - Control characters, combining marks: return 0
+        """
+        w = wcwidth.wcwidth(char)
+        return w if w > 0 else 0
+
+    @classmethod
+    def _parse_csi_sequence(cls, s: str, start: int) -> tuple[str, int]:
+        """Parse CSI escape sequence starting at position.
+
+        Args:
+            s: The string to parse
+            start: Index where ESC[ begins
+
+        Returns:
+            Tuple of (sequence_string, end_index)
+        """
+        j = start + 2  # Skip ESC[
+        while j < len(s) and s[j] not in cls._CSI_TERMINATORS:
+            j += 1
+        if j < len(s):
+            j += 1  # Include the final character
+        return s[start:j], j
+
+    @classmethod
     def strip_ansi(cls, s: str) -> str:
         """Remove ANSI escape sequences from string."""
         return cls._ANSI_PATTERN.sub("", s)
 
     @classmethod
     def visual_len(cls, s: str) -> int:
-        """Calculate visual length of string, excluding ANSI escape codes."""
-        return len(cls.strip_ansi(s))
+        """Calculate visual length of string, excluding ANSI escape codes.
+
+        Uses wcwidth for proper handling of:
+        - Wide characters (CJK, emoji): count as 2 columns
+        - Zero-width characters (combining marks): count as 0 columns
+        - Control characters: count as 0 columns
+        """
+        stripped = cls.strip_ansi(s)
+        width = 0
+        for char in stripped:
+            width += cls._get_char_width(char)
+        return width
 
     @classmethod
     def truncate_to_width(cls, s: str, max_width: int, ellipsis: str = "…") -> str:
@@ -124,8 +182,9 @@ class ANSI:
         if visual_len <= max_width:
             return s
 
-        # Account for ellipsis in target width
-        target_width = max_width - len(ellipsis)
+        # Account for ellipsis in target width (use visual_len for proper width)
+        ellipsis_width = cls.visual_len(ellipsis)
+        target_width = max_width - ellipsis_width
         if target_width <= 0:
             return ellipsis[:max_width]
 
@@ -137,17 +196,15 @@ class ANSI:
         while i < len(s) and visual_pos < target_width:
             # Check for ANSI escape sequence
             if s[i] == "\033" and i + 1 < len(s) and s[i + 1] == "[":
-                # Find end of escape sequence
-                j = i + 2
-                while j < len(s) and s[j] not in "mHJK":
-                    j += 1
-                if j < len(s):
-                    j += 1  # Include the final character
-                result.append(s[i:j])
+                seq, j = cls._parse_csi_sequence(s, i)
+                result.append(seq)
                 i = j
             else:
+                char_width = cls._get_char_width(s[i])
+                if visual_pos + char_width > target_width:
+                    break  # Would exceed width
                 result.append(s[i])
-                visual_pos += 1
+                visual_pos += char_width
                 i += 1
 
         return "".join(result) + ellipsis + cls.RESET
@@ -175,24 +232,23 @@ class ANSI:
         while i < len(s):
             # Check for ANSI escape sequence
             if s[i] == "\033" and i + 1 < len(s) and s[i + 1] == "[":
-                # Find end of escape sequence
-                j = i + 2
-                while j < len(s) and s[j] not in "mHJK":
-                    j += 1
-                if j < len(s):
-                    j += 1
-                code = s[i:j]
+                code, j = cls._parse_csi_sequence(s, i)
                 current_line.append(code)
 
-                # Track active codes (reset clears, others add)
-                if code == "\033[0m":
+                # Track active codes for carry-over across lines
+                # Reset code (0m) clears all active codes
+                # Other SGR codes (ending in 'm') are tracked
+                if code == "\033[0m" or code == cls.RESET:
                     active_codes = []
-                else:
+                elif code.endswith("m"):
+                    # Only track SGR (style) codes, not cursor movement etc.
                     active_codes.append(code)
                 i = j
             else:
+                char_width = cls._get_char_width(s[i])
+
                 # Check if we need to wrap
-                if visual_pos >= max_width:
+                if visual_pos + char_width > max_width and visual_pos > 0:
                     # End current line with reset
                     current_line.append(cls.RESET)
                     lines.append("".join(current_line))
@@ -201,7 +257,7 @@ class ANSI:
                     visual_pos = 0
 
                 current_line.append(s[i])
-                visual_pos += 1
+                visual_pos += char_width
                 i += 1
 
         # Add remaining content
@@ -424,7 +480,12 @@ class RawInputReader:
         self.old_settings: list[Any] | None = None
 
     def start(self) -> None:
-        """Enter raw mode and flush any pending input."""
+        """Enter raw mode and flush any pending input.
+
+        This method is idempotent - calling it when already started is a no-op.
+        """
+        if self.old_settings is not None:
+            return  # Already started - no-op
         self.old_settings = termios.tcgetattr(self.fd)
         # Flush any pending input to avoid stale keystrokes
         termios.tcflush(self.fd, termios.TCIFLUSH)
@@ -595,6 +656,10 @@ class TerminalRegion:
         self._write(ANSI.CARRIAGE_RETURN)
         self._cursor_at_line = 0
 
+    def move_to_start(self) -> None:
+        """Move cursor to start of region (public API)."""
+        self._move_to_region_start()
+
     def activate(self, num_lines: int) -> None:
         """Reserve space at bottom of terminal."""
         self.num_lines = num_lines
@@ -614,16 +679,26 @@ class TerminalRegion:
         # Move to region start
         self._move_to_region_start()
 
+        # Get terminal width for exact-fill detection
+        terminal_width = ANSI.get_terminal_width()
+
         # Render each line
         for i in range(self.num_lines):
-            # Clear line and move to column 1
-            ANSI.clear_line()
+            # Move to column 1 (overwrite instead of clear)
+            self._write(ANSI.CARRIAGE_RETURN)
             if i < len(lines):
                 self._write(lines[i])
+                # Only clear to end if line doesn't fill terminal width.
+                # When line exactly fills terminal, cursor may auto-wrap to next line,
+                # and CLEAR_TO_END would then erase that line's content.
+                if ANSI.visual_len(lines[i]) < terminal_width:
+                    self._write(ANSI.CLEAR_TO_END)
+            else:
+                # No content for this line - clear it
+                self._write(ANSI.CLEAR_TO_END)
             if i < self.num_lines - 1:
-                # Move down one row and to column 1
+                # Move down one row
                 self._write("\n")
-                self._write(ANSI.CARRIAGE_RETURN)
                 self._cursor_at_line = i + 1
 
         # Position cursor at end of last line (for visual feedback)

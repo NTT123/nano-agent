@@ -8,14 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .base import ActiveElement, InputEvent
-
-# ANSI color codes
-YELLOW = "\033[33m"
-CYAN = "\033[36m"
-GREEN = "\033[32m"
-DIM = "\033[2m"
-RESET = "\033[0m"
-BOLD = "\033[1m"
+from .terminal import ANSI
 
 
 @dataclass
@@ -37,21 +30,21 @@ class ConfirmPrompt(ActiveElement[bool | None]):
         lines = []
         # Add preview with visual separator
         if self.preview_lines:
-            lines.append(DIM + "┌" + "─" * 50 + RESET)
+            lines.append(ANSI.DIM + "┌" + "─" * 50 + ANSI.RESET)
             for line in self.preview_lines[: self.max_preview_lines]:
                 # Truncate long lines
                 display_line = line[:48] if len(line) > 48 else line
-                lines.append(DIM + "│ " + RESET + display_line)
+                lines.append(ANSI.DIM + "│ " + ANSI.RESET + display_line)
             if len(self.preview_lines) > self.max_preview_lines:
                 lines.append(
-                    DIM
+                    ANSI.DIM
                     + f"│ ... ({len(self.preview_lines) - self.max_preview_lines} more lines)"
-                    + RESET
+                    + ANSI.RESET
                 )
-            lines.append(DIM + "└" + "─" * 50 + RESET)
+            lines.append(ANSI.DIM + "└" + "─" * 50 + ANSI.RESET)
 
         # Highlighted prompt: message in yellow, options in dim
-        prompt_line = f"{YELLOW}{BOLD}{self.message}{RESET} {DIM}[y/n/esc]:{RESET} {GREEN}{self._response}{RESET}"
+        prompt_line = f"{ANSI.YELLOW}{ANSI.BOLD}{self.message}{ANSI.RESET} {ANSI.DIM}[y/n/esc]:{ANSI.RESET} {ANSI.GREEN}{self._response}{ANSI.RESET}"
         lines.append(prompt_line)
         return lines
 

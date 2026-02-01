@@ -233,10 +233,11 @@ def format_user_message(text: str) -> RenderableType:
     lines = text.split("\n")
     if not lines:
         return Text(prompt, style="on grey30")
+    # Only first line gets the prompt prefix, subsequent lines have no indent
+    # (matches footer input rendering behavior)
     padded = [f"{prompt}{lines[0]}"]
-    indent = " " * len(prompt)
     for line in lines[1:]:
-        padded.append(f"{indent}{line}")
+        padded.append(line)
     return Text("\n".join(padded), style="on grey30")
 
 

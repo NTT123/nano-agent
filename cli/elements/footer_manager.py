@@ -79,18 +79,23 @@ class FooterElementManager:
                 event = await input_reader.read()
                 done, result = element.handle_input(event)
 
-                # Re-render content
-                lines = element.get_lines()
-                self._footer.set_content(lines)
+                # Re-render content (skip on completion to avoid flickering -
+                # add_message() will handle the seamless transition)
+                if not done:
+                    lines = element.get_lines()
+                    self._footer.set_content(lines)
 
                 if done:
-                    # Brief pause so user can see their response
-                    await asyncio.sleep(0.15)
+                    # Allow element to specify completion delay (text input = 0)
+                    delay = element.completion_delay()
+                    if delay > 0:
+                        await asyncio.sleep(delay)
                     return result  # type: ignore[return-value]
 
         finally:
             input_reader.stop()
             element.on_deactivate()
-            # Clear content but keep status bar visible
-            self._footer.clear_content()
+            # Don't clear content here - let add_message() handle the transition
+            # to avoid flickering. The content will be overwritten in place.
+            # self._footer.clear_content()  # Removed - handled by overwrite transition
             self._active = None
