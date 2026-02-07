@@ -23,10 +23,9 @@ from typing import (
     get_type_hints,
 )
 
-from ..data_structures import TextContent
+from ..data_structures import SubGraph, TextContent
 
 if TYPE_CHECKING:
-    from ..data_structures import SubGraph
     from ..execution_context import ExecutionContext
 
 

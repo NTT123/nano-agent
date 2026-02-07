@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 from .cancellation import CancellationToken
-from .data_structures import SubGraph
+from .data_structures import Message, Role, SubGraph, TextContent
 
 if TYPE_CHECKING:
     from .api_base import APIProtocol
@@ -167,8 +167,6 @@ def _extract_summary(dag: DAG) -> str:
 
     Looks for the last assistant message with text content.
     """
-    from .data_structures import Message, Role, TextContent
-
     if not dag._heads:
         return ""
 

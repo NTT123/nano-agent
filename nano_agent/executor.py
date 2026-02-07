@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable
 
 import httpx
 
@@ -11,9 +11,7 @@ from .api_base import APIError, APIProtocol
 from .cancellation import CancellationToken
 from .dag import DAG
 from .data_structures import Response, TextContent
-
-if TYPE_CHECKING:
-    from .execution_context import ExecutionContext
+from .execution_context import ExecutionContext
 
 # Type alias for permission callback
 # Takes (tool_name, tool_input) and returns True if allowed, False if denied
@@ -25,7 +23,7 @@ async def run(
     dag: DAG,
     cancel_token: CancellationToken | None = None,
     permission_callback: PermissionCallback | None = None,
-    execution_context: "ExecutionContext | None" = None,
+    execution_context: ExecutionContext | None = None,
 ) -> DAG:
     """Run agent loop until stop reason or cancellation.
 
@@ -50,7 +48,6 @@ async def run(
         ToolExecution,
         ToolResultContent,
     )
-    from .execution_context import ExecutionContext
 
     # Get tools from DAG
     tools = dag._tools or ()
