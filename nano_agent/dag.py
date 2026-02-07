@@ -889,6 +889,84 @@ class DAG:
         return dag, metadata
 
     # -------------------------------------------------------------------------
+    # SubGraph conversion
+    # -------------------------------------------------------------------------
+
+    def to_sub_graph(
+        self,
+        tool_name: str,
+        tool_use_id: str,
+        summary: str = "",
+        depth: int = 0,
+    ) -> SubGraph:
+        """Create SubGraph from this DAG instance.
+
+        Args:
+            tool_name: Name of the tool that spawned this sub-agent
+            tool_use_id: ID of the tool call
+            summary: Summary of the sub-agent's results
+            depth: Nesting depth of this sub-agent
+
+        Returns:
+            SubGraph containing serialized DAG
+        """
+        all_nodes: dict[str, object] = {}
+        head_ids: list[str] = []
+
+        if self._heads:
+            for head in self._heads:
+                head_ids.append(head.id)
+                for node in head.ancestors():
+                    all_nodes[node.id] = node.to_dict()
+
+        return SubGraph(
+            tool_name=tool_name,
+            tool_use_id=tool_use_id,
+            system_prompt=self.get_system_prompt() if self._heads else "",
+            nodes=all_nodes,
+            head_ids=head_ids,
+            summary=summary,
+            depth=depth,
+        )
+
+    @classmethod
+    def from_sub_graph(cls, sub_graph: SubGraph) -> "DAG":
+        """Reconstruct DAG from a SubGraph.
+
+        Args:
+            sub_graph: SubGraph containing serialized nodes
+
+        Returns:
+            DAG instance with reconstructed nodes
+        """
+        if not sub_graph.nodes:
+            return cls()
+
+        node_map: dict[str, Node] = {}
+        remaining = dict(sub_graph.nodes)
+
+        while remaining:
+            ready = [
+                nid
+                for nid, ndata in remaining.items()
+                if isinstance(ndata, dict)
+                and all(pid in node_map for pid in ndata.get("parent_ids", []))
+            ]
+            if not ready:
+                raise ValueError("Cycle or missing parents in SubGraph")
+            for nid in ready:
+                ndata = remaining.pop(nid)
+                if isinstance(ndata, dict):
+                    node_map[nid] = Node._from_dict(ndata, node_map)
+
+        heads = [node_map[hid] for hid in sub_graph.head_ids if hid in node_map]
+        if not heads and node_map:
+            has_children = {p.id for n in node_map.values() for p in n.parents}
+            heads = [n for n in node_map.values() if n.id not in has_children]
+
+        return cls(_heads=tuple(heads))
+
+    # -------------------------------------------------------------------------
     # Internal helpers
     # -------------------------------------------------------------------------
 

@@ -152,8 +152,7 @@ async def run_sub_agent(
     summary = _extract_summary(result_dag)
 
     # Create SubGraph for storage
-    sub_graph = SubGraph.from_dag(
-        dag=result_dag,
+    sub_graph = result_dag.to_sub_graph(
         tool_name=tool_name,
         tool_use_id=tool_use_id,
         summary=summary,

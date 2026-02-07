@@ -163,13 +163,12 @@ class TestSubGraph:
         assert sg.depth == 2
 
     def test_subgraph_from_dag(self):
-        """Test SubGraph.from_dag creates SubGraph from DAG."""
+        """Test DAG.to_sub_graph creates SubGraph from DAG."""
         dag = DAG(system_prompt="Test system prompt")
         dag = dag.user("Hello")
         dag = dag.assistant("Hi there!")
 
-        sg = SubGraph.from_dag(
-            dag=dag,
+        sg = dag.to_sub_graph(
             tool_name="TestAgent",
             tool_use_id="agent_123",
             summary="Completed task",
@@ -190,14 +189,13 @@ class TestSubGraph:
         original_dag = original_dag.user("User message")
         original_dag = original_dag.assistant("Assistant response")
 
-        sg = SubGraph.from_dag(
-            dag=original_dag,
+        sg = original_dag.to_sub_graph(
             tool_name="TestAgent",
             tool_use_id="agent_123",
         )
 
         # Convert back to DAG
-        restored_dag = sg.to_dag()
+        restored_dag = DAG.from_sub_graph(sg)
 
         # Verify messages are preserved
         messages = restored_dag.to_messages()
