@@ -248,12 +248,16 @@ class OpenAIAPI:
 
         # Parse usage
         usage_data = data.get("usage", {})
+        input_details = usage_data.get("input_tokens_details", {})
+        output_details = usage_data.get("output_tokens_details", {})
         usage = Usage(
             input_tokens=usage_data.get("input_tokens", 0),
             output_tokens=usage_data.get("output_tokens", 0),
-            # OpenAI doesn't have cache tokens, leave as 0
             cache_creation_input_tokens=0,
             cache_read_input_tokens=0,
+            reasoning_tokens=output_details.get("reasoning_tokens", 0),
+            cached_tokens=input_details.get("cached_tokens", 0),
+            total_tokens=usage_data.get("total_tokens", 0),
         )
 
         # Determine stop reason from status

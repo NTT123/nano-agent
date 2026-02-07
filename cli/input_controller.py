@@ -142,6 +142,7 @@ class InputController:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         thinking_tokens: int | None = None,
+        cost: float | None = None,
     ) -> None:
         """Update status bar values."""
         self.footer.update_status(
@@ -149,6 +150,7 @@ class InputController:
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             thinking_tokens=thinking_tokens,
+            cost=cost,
         )
 
     async def set_activity(self, activity: str | None) -> None:

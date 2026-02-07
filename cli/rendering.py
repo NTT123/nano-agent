@@ -29,12 +29,18 @@ class MessageRenderer:
         output_tokens: int,
         cache_creation_tokens: int = 0,
         cache_read_tokens: int = 0,
+        reasoning_tokens: int = 0,
+        cached_tokens: int = 0,
+        cost: float = 0.0,
     ) -> Text:
         return display.format_token_count(
             input_tokens,
             output_tokens,
             cache_creation_tokens=cache_creation_tokens,
             cache_read_tokens=cache_read_tokens,
+            reasoning_tokens=reasoning_tokens,
+            cached_tokens=cached_tokens,
+            cost=cost,
         )
 
     def tool_call(self, name: str, params: dict[str, object]) -> Text:

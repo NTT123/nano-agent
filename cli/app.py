@@ -56,6 +56,7 @@ from nano_agent.cancellation import (
     TrackedToolCall,
 )
 from nano_agent.capture_claude_code_auth import async_get_config
+from nano_agent.cost import calculate_cost
 from nano_agent.tools import (
     AskUserQuestionTool,
     BashTool,
@@ -71,9 +72,9 @@ from nano_agent.tools import (
     convert_input,
 )
 
+from . import display
 from .commands import CommandContext, CommandRouter
 from .config import load_cli_config, save_cli_config
-from . import display
 from .elements.terminal import ANSI
 from .input_controller import InputController
 from .mapper import DAGMessageMapper
@@ -217,6 +218,7 @@ class TerminalApp:
     last_input_tokens: int = 0
     last_output_tokens: int = 0
     last_thinking_tokens: int = 0
+    total_cost: float = 0.0
     # Concurrent execution support
     pending_messages: asyncio.Queue[str] = field(default_factory=asyncio.Queue)
     _execution_task: asyncio.Task[None] | None = field(
@@ -320,6 +322,7 @@ class TerminalApp:
             input_tokens=self.last_input_tokens,
             output_tokens=self.last_output_tokens,
             thinking_tokens=self.last_thinking_tokens,
+            cost=self.total_cost,
         )
 
     def add_message(self, msg: UIMessage) -> UIMessage:
@@ -1106,6 +1109,10 @@ class TerminalApp:
                 add_thinking_to_assistant(msg, thinking.thinking)
                 has_thinking = True
 
+        # Calculate cost for this response
+        cost_breakdown = calculate_cost(response.usage, model=response.model)
+        self.total_cost += cost_breakdown.total_cost
+
         # Add text content with token count
         text_content = response.get_text()
         add_text_to_assistant(
@@ -1116,6 +1123,9 @@ class TerminalApp:
             output_tokens=response.usage.output_tokens,
             cache_creation_tokens=response.usage.cache_creation_input_tokens,
             cache_read_tokens=response.usage.cache_read_input_tokens,
+            reasoning_tokens=response.usage.reasoning_tokens,
+            cached_tokens=response.usage.cached_tokens,
+            cost=cost_breakdown.total_cost,
         )
 
         # Store metadata
@@ -1125,11 +1135,7 @@ class TerminalApp:
         # Track last-step token stats (for footer)
         self.last_input_tokens = response.usage.input_tokens
         self.last_output_tokens = response.usage.output_tokens
-        self.last_thinking_tokens = (
-            response.usage.reasoning_tokens
-            if response.usage.reasoning_tokens
-            else response.usage.cache_creation_input_tokens
-        )
+        self.last_thinking_tokens = response.usage.reasoning_tokens
 
         # Update footer status bar with new token counts
         self._sync_status_to_footer()

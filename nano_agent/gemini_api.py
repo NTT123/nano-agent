@@ -256,9 +256,10 @@ class GeminiAPI(APIClientMixin):
         usage = Usage(
             input_tokens=usage_data.get("promptTokenCount", 0),
             output_tokens=usage_data.get("candidatesTokenCount", 0),
-            # Gemini may have thinking tokens separate
-            cache_creation_input_tokens=usage_data.get("thoughtsTokenCount", 0),
-            cache_read_input_tokens=0,
+            cache_creation_input_tokens=0,
+            cache_read_input_tokens=usage_data.get("cachedContentTokenCount", 0),
+            reasoning_tokens=usage_data.get("thoughtsTokenCount", 0),
+            total_tokens=usage_data.get("totalTokenCount", 0),
         )
 
         # Map finish reason

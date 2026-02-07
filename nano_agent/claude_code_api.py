@@ -190,6 +190,41 @@ class ClaudeCodeAPI(APIClientMixin):
             f")"
         )
 
+    @staticmethod
+    def _add_system_cache_control(system_messages: list[dict[str, Any]]) -> None:
+        """Add cache_control to the last 2 system blocks (up to 2 breakpoints).
+
+        Strips any existing cache_control first to avoid exceeding the
+        4-breakpoint limit when captured system messages already contain
+        cache_control from the original Claude Code request.
+        """
+        for block in system_messages:
+            block.pop("cache_control", None)
+        for block in system_messages[-2:]:
+            block["cache_control"] = {"type": "ephemeral"}
+
+    @staticmethod
+    def _add_message_cache_control(messages_dicts: list[dict[str, Any]]) -> None:
+        """Add cache_control to the last content block of the last 2 messages.
+
+        This mirrors the Claude Code CLI pattern: cache_control on the
+        second-to-last message (typically the last assistant response) and
+        on the last message (the current user message).  Combined with 2
+        system breakpoints this uses all 4 allowed breakpoints.
+        """
+        for msg in messages_dicts[-2:]:
+            content = msg.get("content")
+            if isinstance(content, list) and content:
+                content[-1]["cache_control"] = {"type": "ephemeral"}
+            elif isinstance(content, str):
+                msg["content"] = [
+                    {
+                        "type": "text",
+                        "text": content,
+                        "cache_control": {"type": "ephemeral"},
+                    }
+                ]
+
     async def send(
         self,
         messages: list[Message] | DAG,
@@ -224,6 +259,8 @@ class ClaudeCodeAPI(APIClientMixin):
                 system_messages.extend(
                     {"type": "text", "text": prompt} for prompt in dag_system_prompts
                 )
+            # Cache system blocks (up to 2 breakpoints on last 2 blocks)
+            self._add_system_cache_control(system_messages)
         else:
             tools_list = []
             if tools:
@@ -233,12 +270,20 @@ class ClaudeCodeAPI(APIClientMixin):
                 system_messages = list(self.captured_system)
             else:
                 system_messages = list(DEFAULT_SYSTEM)
+            self._add_system_cache_control(system_messages)
 
         # Build request body - convert messages to Claude format
         # (handles sessions created with OpenAI/Codex APIs)
-        messages_dicts = [
-            convert_message_to_claude_format(msg.to_dict()) for msg in messages
+        messages_dicts: list[dict[str, Any]] = [
+            dict(convert_message_to_claude_format(msg.to_dict()))
+            for msg in messages
         ]
+
+        # Prompt caching: use up to 4 breakpoints total (matching Claude Code):
+        #   2 on system blocks (above) + 2 on last 2 messages (below)
+        # This caches the conversation prefix incrementally across turns.
+        self._add_message_cache_control(messages_dicts)
+
         request_body: dict[str, Any] = {
             "model": self.model,
             "messages": messages_dicts,

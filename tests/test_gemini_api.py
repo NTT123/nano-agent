@@ -303,8 +303,9 @@ class TestResponseParsing:
         assert response.content[0].thinking == "Let me calculate..."
         assert isinstance(response.content[1], TextContent)
         assert response.content[1].text == "The answer is 4"
-        # Thinking tokens stored in cache_creation_input_tokens
-        assert response.usage.cache_creation_input_tokens == 15
+        # Thinking tokens stored in reasoning_tokens
+        assert response.usage.reasoning_tokens == 15
+        assert response.usage.cache_creation_input_tokens == 0
 
     def test_parse_error_response(self) -> None:
         """Test that _parse_response raises when no candidates (error responses have no candidates).

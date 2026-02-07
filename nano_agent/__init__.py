@@ -38,6 +38,9 @@ from .codex_auth import (
     load_codex_auth,
 )
 
+# Cost tracking
+from .cost import CostBreakdown, ModelPricing, calculate_cost, format_cost, get_pricing
+
 # Core graph primitives
 from .dag import DAG, Node
 
@@ -223,6 +226,12 @@ __all__ = [
     # Todo data classes (merged from tool_handlers)
     "Todo",
     "TodoStatus",
+    # Cost tracking
+    "CostBreakdown",
+    "ModelPricing",
+    "calculate_cost",
+    "format_cost",
+    "get_pricing",
     # Executor
     "run",
     # Default tools function

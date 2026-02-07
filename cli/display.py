@@ -6,8 +6,8 @@ for display in Textual's RichLog widget.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import os
+from dataclasses import dataclass
 from typing import Iterable, Iterator, TypeVar
 
 from rich import box
@@ -497,6 +497,9 @@ def format_token_count(
     output_tokens: int,
     cache_creation_tokens: int = 0,
     cache_read_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    cached_tokens: int = 0,
+    cost: float = 0.0,
 ) -> Text:
     """Format token usage statistics.
 
@@ -505,6 +508,9 @@ def format_token_count(
         output_tokens: Number of output tokens
         cache_creation_tokens: Number of cache creation tokens (optional)
         cache_read_tokens: Number of cache read tokens (optional)
+        reasoning_tokens: Number of reasoning/thinking tokens (optional)
+        cached_tokens: Number of cached input tokens (optional)
+        cost: Cost in dollars (optional)
 
     Returns:
         Formatted Text object with token statistics
@@ -515,6 +521,11 @@ def format_token_count(
     result.append(" ", style="dim")
     result.append(f"out={output_tokens}", style="green dim")
 
+    # Add reasoning tokens if present
+    if reasoning_tokens > 0:
+        result.append(" ", style="dim")
+        result.append(f"reasoning={reasoning_tokens}", style="red dim")
+
     # Add cache info if present
     if cache_creation_tokens > 0:
         result.append(" ", style="dim")
@@ -522,10 +533,20 @@ def format_token_count(
     if cache_read_tokens > 0:
         result.append(" ", style="dim")
         result.append(f"cache_read={cache_read_tokens}", style="blue dim")
+    if cached_tokens > 0:
+        result.append(" ", style="dim")
+        result.append(f"cached={cached_tokens}", style="blue dim")
 
     # Add total
     total = input_tokens + output_tokens
     result.append(" ", style="dim")
     result.append(f"total={total}", style="magenta dim")
+
+    # Add cost if present
+    if cost > 0:
+        from nano_agent.cost import format_cost
+
+        result.append(" ", style="dim")
+        result.append(f"Cost: {format_cost(cost)}", style="yellow")
 
     return result

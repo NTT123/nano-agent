@@ -10,9 +10,9 @@ from typing import Any
 
 from rich.text import Text
 
+from . import display
 from .messages import MessageStatus, RenderItem, UIMessage
 from .rendering import MessageRenderer
-from . import display
 
 renderer = MessageRenderer()
 
@@ -113,6 +113,9 @@ def add_text_to_assistant(
     output_tokens: int = 0,
     cache_creation_tokens: int = 0,
     cache_read_tokens: int = 0,
+    reasoning_tokens: int = 0,
+    cached_tokens: int = 0,
+    cost: float = 0.0,
 ) -> None:
     """Add text response to an assistant message.
 
@@ -124,6 +127,9 @@ def add_text_to_assistant(
         output_tokens: Output token count
         cache_creation_tokens: Cache creation token count
         cache_read_tokens: Cache read token count
+        reasoning_tokens: Reasoning/thinking token count
+        cached_tokens: Cached input token count
+        cost: Cost in dollars
     """
     content_added = False
     if text and text.strip():
@@ -140,6 +146,9 @@ def add_text_to_assistant(
                 output_tokens,
                 cache_creation_tokens=cache_creation_tokens,
                 cache_read_tokens=cache_read_tokens,
+                reasoning_tokens=reasoning_tokens,
+                cached_tokens=cached_tokens,
+                cost=cost,
             )
         )
         content_added = True
@@ -229,7 +238,9 @@ def create_permission_message(
     msg.append(Text(f"File: {file_path}", style=palette.permission_file))
     if match_count > 1:
         msg.append(
-            Text(f"(Replacing {match_count} occurrences)", style=palette.permission_note)
+            Text(
+                f"(Replacing {match_count} occurrences)", style=palette.permission_note
+            )
         )
     msg.append(Text("Confirm: press y/n/Esc", style=palette.permission_prompt))
     msg.append_newline()

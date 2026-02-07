@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Never, TypeAlias, TypedDict
+from typing import TYPE_CHECKING, Never, NotRequired, TypeAlias, TypedDict
 
 if TYPE_CHECKING:
     from .dag import DAG
@@ -70,11 +70,18 @@ class JSONSchema(TypedDict, total=False):
 # =============================================================================
 
 
+class CacheControl(TypedDict):
+    """Anthropic prompt caching control."""
+
+    type: str  # "ephemeral"
+
+
 class TextContentDict(TypedDict):
     """Serialized form of TextContent."""
 
     type: str
     text: str
+    cache_control: NotRequired[CacheControl]
 
 
 class ThinkingContentDict(TypedDict, total=False):
@@ -83,6 +90,7 @@ class ThinkingContentDict(TypedDict, total=False):
     type: str
     thinking: str
     signature: str
+    cache_control: CacheControl
     # OpenAI reasoning format
     id: str
     encrypted_content: str
@@ -96,6 +104,7 @@ class ToolUseContentDict(TypedDict):
     id: str
     name: str
     input: dict[str, JSONValue] | None
+    cache_control: NotRequired[CacheControl]
 
 
 class ToolResultContentDict(TypedDict):
@@ -105,6 +114,7 @@ class ToolResultContentDict(TypedDict):
     tool_use_id: str
     content: list[TextContentDict]
     is_error: bool
+    cache_control: NotRequired[CacheControl]
 
 
 # Forward reference for MessageDict (content can be string or list of content blocks)

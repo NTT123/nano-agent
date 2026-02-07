@@ -70,7 +70,7 @@ class ExecutionContext:
         Raises:
             RecursionError: If depth limit exceeded
         """
-        if self.depth >= self.max_depth:
+        if self.depth > self.max_depth:
             raise RecursionError(
                 f"Sub-agent depth limit exceeded (max={self.max_depth})"
             )

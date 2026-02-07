@@ -71,6 +71,9 @@ async def run(
         "output_tokens": 0,
         "cache_creation_input_tokens": 0,
         "cache_read_input_tokens": 0,
+        "reasoning_tokens": 0,
+        "cached_tokens": 0,
+        "total_tokens": 0,
     }
     stop_reason = "end_turn"
 
@@ -119,6 +122,9 @@ async def run(
             "cache_creation_input_tokens"
         ] += response.usage.cache_creation_input_tokens
         total_usage["cache_read_input_tokens"] += response.usage.cache_read_input_tokens
+        total_usage["reasoning_tokens"] += response.usage.reasoning_tokens
+        total_usage["cached_tokens"] += response.usage.cached_tokens
+        total_usage["total_tokens"] += response.usage.total_tokens
         stop_reason = response.stop_reason or "unknown"
 
         # Check for tool calls first (OpenAI returns "completed" even with tool calls)
@@ -142,7 +148,26 @@ async def run(
                 cancelled = True
                 break
 
-            tool = tool_map[call.name]
+            tool = tool_map.get(call.name)
+            if tool is None:
+                error_result = TextContent(text=f"Unknown tool: {call.name}")
+                result_node = tool_use_head.child(
+                    ToolExecution(
+                        tool_name=call.name,
+                        tool_use_id=call.id,
+                        result=[error_result],
+                        is_error=True,
+                    )
+                )
+                result_nodes.append(result_node)
+                tool_results.append(
+                    ToolResultContent(
+                        tool_use_id=call.id,
+                        content=[error_result],
+                        is_error=True,
+                    )
+                )
+                continue
 
             # Check permission for EditConfirm
             if call.name == "EditConfirm" and permission_callback is not None:
@@ -196,6 +221,25 @@ async def run(
                 cancelled_at_index = i  # Tool was running when cancelled
                 cancelled = True
                 break
+            except Exception as e:
+                error_result = TextContent(text=f"Tool error: {e}")
+                result_node = tool_use_head.child(
+                    ToolExecution(
+                        tool_name=call.name,
+                        tool_use_id=call.id,
+                        result=[error_result],
+                        is_error=True,
+                    )
+                )
+                result_nodes.append(result_node)
+                tool_results.append(
+                    ToolResultContent(
+                        tool_use_id=call.id,
+                        content=[error_result],
+                        is_error=True,
+                    )
+                )
+                continue
 
             # Normalize content to list
             result = tool_result.content

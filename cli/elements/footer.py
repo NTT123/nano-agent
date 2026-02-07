@@ -40,6 +40,7 @@ class StatusBarState:
     input_tokens: int = 0
     output_tokens: int = 0
     thinking_tokens: int = 0
+    cost: float = 0.0
     activity: str | None = None  # "Thinking...", "Running Bash...", etc.
 
     # Spinner animation
@@ -159,6 +160,12 @@ class TerminalFooter:
             f"{self._status.output_tokens:,}↑ "
             f"{self._status.thinking_tokens:,}t{ANSI.RESET}"
         )
+
+        # Cost display
+        if self._status.cost > 0:
+            from nano_agent.cost import format_cost
+
+            parts.append(f"{ANSI.YELLOW}{format_cost(self._status.cost)}{ANSI.RESET}")
 
         # Escape hint when activity is shown
         if self._status.activity:
@@ -348,6 +355,7 @@ class TerminalFooter:
         input_tokens: int | None = None,
         output_tokens: int | None = None,
         thinking_tokens: int | None = None,
+        cost: float | None = None,
     ) -> None:
         """Update status bar values and re-render.
 
@@ -362,6 +370,8 @@ class TerminalFooter:
                 self._status.output_tokens = output_tokens
             if thinking_tokens is not None:
                 self._status.thinking_tokens = thinking_tokens
+            if cost is not None:
+                self._status.cost = cost
             if self._state == FooterState.ACTIVE:
                 self._render_lines(self._get_all_lines())
 

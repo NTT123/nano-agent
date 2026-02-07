@@ -303,6 +303,34 @@ class TestResponseParsing:
         assert isinstance(response.content[0], TextContent)
         assert response.content[0].text == "I cannot help with that."
 
+    def test_parse_usage_with_cached_and_reasoning(self) -> None:
+        api = OpenAIAPI(api_key="test-key")
+        data: dict[str, Any] = {
+            "id": "resp_usage",
+            "model": "gpt-5.2-codex",
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "Hello!"}],
+                }
+            ],
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 500,
+                "total_tokens": 2000,
+                "input_tokens_details": {"cached_tokens": 300},
+                "output_tokens_details": {"reasoning_tokens": 200},
+            },
+        }
+        response = api._parse_response(data)
+
+        assert response.usage.input_tokens == 1000
+        assert response.usage.output_tokens == 500
+        assert response.usage.cached_tokens == 300
+        assert response.usage.reasoning_tokens == 200
+        assert response.usage.total_tokens == 2000
+
 
 class TestSend:
     async def test_send_simple_message(self) -> None:

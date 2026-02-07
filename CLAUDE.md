@@ -22,7 +22,7 @@ uv run python e2e/test_executor_cancellation.py
 # Type checking & formatting
 uv run mypy .
 uv run black .
-uv run isort .
+uv run isort --profile black .
 uv run pre-commit run --all-files
 
 # Run examples
