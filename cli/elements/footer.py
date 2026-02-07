@@ -163,7 +163,7 @@ class TerminalFooter:
 
         # Cost display
         if self._status.cost > 0:
-            from nano_agent.cost import format_cost
+            from nano_agent.providers.cost import format_cost
 
             parts.append(f"{ANSI.YELLOW}{format_cost(self._status.cost)}{ANSI.RESET}")
 

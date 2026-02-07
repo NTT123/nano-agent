@@ -16,8 +16,8 @@ from .cancellation import CancellationToken
 from .data_structures import Message, Role, SubGraph, TextContent
 
 if TYPE_CHECKING:
-    from .api_base import APIProtocol
     from .dag import DAG
+    from .providers.base import APIProtocol
     from .tools import Tool
 
 # Type alias for permission callback

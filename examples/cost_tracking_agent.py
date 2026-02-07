@@ -7,7 +7,7 @@ each API call in a multi-turn conversation.
 import asyncio
 
 from nano_agent import DAG, ClaudeAPI
-from nano_agent.cost import calculate_cost, format_cost
+from nano_agent.providers.cost import calculate_cost, format_cost
 
 
 async def main() -> None:

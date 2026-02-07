@@ -47,7 +47,6 @@ from nano_agent import (
     ToolResultContent,
     ToolUseContent,
 )
-from nano_agent.api_base import APIError
 from nano_agent.cancellation import (
     CancellationChoice,
     CancellationToken,
@@ -55,8 +54,9 @@ from nano_agent.cancellation import (
     ToolExecutionStatus,
     TrackedToolCall,
 )
-from nano_agent.capture_claude_code_auth import async_get_config
-from nano_agent.cost import calculate_cost
+from nano_agent.providers.base import APIError
+from nano_agent.providers.capture_claude_code_auth import async_get_config
+from nano_agent.providers.cost import calculate_cost
 from nano_agent.tools import (
     AskUserQuestionTool,
     BashTool,
@@ -1526,7 +1526,7 @@ def main() -> None:
 
     # Handle --renew: refresh token and exit immediately
     if args.renew:
-        from nano_agent.capture_claude_code_auth import async_get_config
+        from nano_agent.providers.capture_claude_code_auth import async_get_config
 
         async def do_renew() -> int:
             try:

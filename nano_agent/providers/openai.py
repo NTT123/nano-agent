@@ -8,8 +8,8 @@ from typing import Any
 
 import httpx
 
-from .dag import DAG
-from .data_structures import (
+from ..dag import DAG
+from ..data_structures import (
     ContentBlock,
     Message,
     Response,
@@ -20,7 +20,7 @@ from .data_structures import (
     ToolUseContent,
     Usage,
 )
-from .tools import Tool
+from ..tools import Tool
 
 __all__ = ["OpenAIAPI"]
 
@@ -304,12 +304,14 @@ class OpenAIAPI:
             if dag_system_prompts:
                 system_prompt = "\n\n".join(dag_system_prompts)
 
-        # Build input array - start with system prompt if provided
+        # Put system prompt as developer message in input for caching support.
+        # The `instructions` parameter does not participate in OpenAI prefix
+        # caching — only the `input` array prefix is cached.
         input_items: list[dict[str, Any]] = []
         if system_prompt:
             input_items.append(
                 {
-                    "role": "system",
+                    "role": "developer",
                     "content": [{"type": "input_text", "text": system_prompt}],
                 }
             )

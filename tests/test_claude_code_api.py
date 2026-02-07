@@ -36,7 +36,7 @@ MOCK_BODY_PARAMS: dict[str, Any] = {
 @pytest.fixture
 def mock_load_config() -> Generator[MagicMock, None, None]:
     """Mock load_config to return test config without reading from file."""
-    with patch("nano_agent.capture_claude_code_auth.load_config") as mock:
+    with patch("nano_agent.providers.capture_claude_code_auth.load_config") as mock:
         mock.return_value = (MOCK_HEADERS.copy(), MOCK_BODY_PARAMS.copy())
         yield mock
 
@@ -73,7 +73,7 @@ class TestClaudeCodeAPIInit:
 
     def test_init_raises_without_auth(self) -> None:
         """Verify clear error if no auth token available."""
-        with patch("nano_agent.capture_claude_code_auth.load_config") as mock:
+        with patch("nano_agent.providers.capture_claude_code_auth.load_config") as mock:
             mock.return_value = None  # No config file
             with pytest.raises(ValueError) as exc_info:
                 ClaudeCodeAPI()
@@ -81,7 +81,7 @@ class TestClaudeCodeAPIInit:
 
     def test_init_with_explicit_auth_token(self) -> None:
         """Verify explicit auth_token works without config file."""
-        with patch("nano_agent.capture_claude_code_auth.load_config") as mock:
+        with patch("nano_agent.providers.capture_claude_code_auth.load_config") as mock:
             mock.return_value = None  # No config file
             api = ClaudeCodeAPI(auth_token="sk-ant-explicit-token")
             assert api.auth_token == "sk-ant-explicit-token"
@@ -183,7 +183,7 @@ class TestClaudeCodeAPIDefaults:
 
     def test_defaults_when_config_values_missing(self) -> None:
         """Verify sensible defaults when config values are None."""
-        with patch("nano_agent.capture_claude_code_auth.load_config") as mock:
+        with patch("nano_agent.providers.capture_claude_code_auth.load_config") as mock:
             mock.return_value = (
                 {"authorization": "Bearer test-token"},
                 {
@@ -204,7 +204,7 @@ class TestClaudeCodeAPIDefaults:
 
     def test_defaults_when_no_config_but_explicit_auth(self) -> None:
         """Verify defaults work when no config file but auth provided."""
-        with patch("nano_agent.capture_claude_code_auth.load_config") as mock:
+        with patch("nano_agent.providers.capture_claude_code_auth.load_config") as mock:
             mock.return_value = None
             api = ClaudeCodeAPI(auth_token="sk-ant-test")
             assert api.model == "claude-sonnet-4-20250514"

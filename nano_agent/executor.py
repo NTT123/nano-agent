@@ -7,11 +7,11 @@ from typing import Any, Awaitable, Callable
 
 import httpx
 
-from .api_base import APIError, APIProtocol
 from .cancellation import CancellationToken
 from .dag import DAG
 from .data_structures import Response, TextContent
 from .execution_context import ExecutionContext
+from .providers.base import APIError, APIProtocol
 
 # Type alias for permission callback
 # Takes (tool_name, tool_input) and returns True if allowed, False if denied

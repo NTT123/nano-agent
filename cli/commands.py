@@ -11,8 +11,8 @@ from rich.json import JSON
 
 from nano_agent import DAG, Tool
 
-from .message_factory import create_error_message, create_system_message
 from . import display
+from .message_factory import create_error_message, create_system_message
 from .messages import UIMessage
 from .session import SessionStore
 

@@ -136,4 +136,6 @@ class TestVisualConsistencyWithFooterInput:
         # The indentation in the code should be preserved
         lines = text_str.split("\n")
         assert lines[0] == "> def foo():"
-        assert lines[1] == "    return 42"  # Code indent preserved, no extra prompt indent
+        assert (
+            lines[1] == "    return 42"
+        )  # Code indent preserved, no extra prompt indent

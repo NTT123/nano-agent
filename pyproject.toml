@@ -41,7 +41,7 @@ nano-cli = "cli:main"
 # Utility commands
 nano-agent-viewer = "scripts.viewer:main"
 nano-agent-console-viewer = "scripts.console_viewer:main"
-nano-agent-capture-auth = "nano_agent.capture_claude_code_auth:main"
+nano-agent-capture-auth = "nano_agent.providers.capture_claude_code_auth:main"
 
 [build-system]
 requires = ["hatchling"]

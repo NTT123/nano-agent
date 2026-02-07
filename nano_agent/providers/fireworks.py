@@ -10,9 +10,8 @@ from typing import Any
 
 import httpx
 
-from .api_base import APIError
-from .dag import DAG
-from .data_structures import (
+from ..dag import DAG
+from ..data_structures import (
     ContentBlock,
     Message,
     Response,
@@ -23,7 +22,8 @@ from .data_structures import (
     ToolUseContent,
     Usage,
 )
-from .tools import Tool
+from ..tools import Tool
+from .base import APIError
 
 __all__ = ["FireworksAPI"]
 

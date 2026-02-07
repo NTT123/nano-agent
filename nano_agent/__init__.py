@@ -6,9 +6,6 @@ This library implements a node-based conversation graph architecture where every
 as nodes in a directed acyclic graph (DAG).
 """
 
-# API base classes (shared infrastructure)
-from .api_base import APIClientMixin, APIError, APIProtocol
-
 # Cancellation support
 from .cancellation import (
     CancellationChoice,
@@ -17,29 +14,6 @@ from .cancellation import (
     ToolExecutionStatus,
     TrackedToolCall,
 )
-
-# Auth capture utilities
-from .capture_claude_code_auth import (
-    DEFAULT_CONFIG_PATH,
-    get_config,
-    get_headers,
-    load_config,
-    save_config,
-)
-
-# API clients
-from .claude_api import ClaudeAPI, Response, Usage
-from .claude_code_api import ClaudeCodeAPI
-from .codex_api import CodexAPI
-from .codex_auth import (
-    DEFAULT_CODEX_AUTH_PATH,
-    get_codex_access_token,
-    get_codex_refresh_token,
-    load_codex_auth,
-)
-
-# Cost tracking
-from .cost import CostBreakdown, ModelPricing, calculate_cost, format_cost, get_pricing
 
 # Core graph primitives
 from .dag import DAG, Node
@@ -54,6 +28,7 @@ from .data_structures import (  # Enums; Content blocks (sum type: ContentBlock)
     Message,
     MessageDict,
     NodeData,
+    Response,
     ResponseDict,
     Role,
     StopReason,
@@ -75,6 +50,7 @@ from .data_structures import (  # Enums; Content blocks (sum type: ContentBlock)
     ToolResultContentDict,
     ToolUseContent,
     ToolUseContentDict,
+    Usage,
     UsageDict,
     assert_never,
 )
@@ -84,9 +60,33 @@ from .execution_context import ExecutionContext, run_sub_agent
 
 # Executor
 from .executor import run
-from .fireworks_api import FireworksAPI
-from .gemini_api import GeminiAPI
-from .openai_api import OpenAIAPI
+
+# API providers (clients, auth, cost tracking)
+from .providers import (
+    DEFAULT_CODEX_AUTH_PATH,
+    DEFAULT_CONFIG_PATH,
+    APIClientMixin,
+    APIError,
+    APIProtocol,
+    ClaudeAPI,
+    ClaudeCodeAPI,
+    CodexAPI,
+    CostBreakdown,
+    FireworksAPI,
+    GeminiAPI,
+    ModelPricing,
+    OpenAIAPI,
+    calculate_cost,
+    format_cost,
+    get_codex_access_token,
+    get_codex_refresh_token,
+    get_config,
+    get_headers,
+    get_pricing,
+    load_codex_auth,
+    load_config,
+    save_config,
+)
 
 # Tools (including Todo data classes merged from tool_handlers)
 from .tools import (

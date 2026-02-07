@@ -9,9 +9,8 @@ from uuid import uuid4
 
 import httpx
 
-from .api_base import APIClientMixin
-from .dag import DAG
-from .data_structures import (
+from ..dag import DAG
+from ..data_structures import (
     ContentBlock,
     Message,
     Response,
@@ -22,7 +21,8 @@ from .data_structures import (
     ToolUseContent,
     Usage,
 )
-from .tools import Tool
+from ..tools import Tool
+from .base import APIClientMixin
 
 __all__ = ["GeminiAPI"]
 

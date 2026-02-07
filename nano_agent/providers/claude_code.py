@@ -12,10 +12,10 @@ from typing import Any
 
 import httpx
 
-from .api_base import APIClientMixin
-from .dag import DAG
-from .data_structures import Message, Response, convert_message_to_claude_format
-from .tools import Tool, ToolDict
+from ..dag import DAG
+from ..data_structures import Message, Response, convert_message_to_claude_format
+from ..tools import Tool, ToolDict
+from .base import APIClientMixin
 
 __all__ = ["ClaudeCodeAPI", "convert_message_to_claude_format"]
 
@@ -35,7 +35,7 @@ DEFAULT_SYSTEM = [
     {
         "type": "text",
         "text": "You are a Claude agent, built on Anthropic's Claude Agent SDK.",
-        "cache_control": {"type": "ephemeral"},
+        "cache_control": {"type": "ephemeral", "ttl": "1h"},
     },
 ]
 
@@ -201,7 +201,7 @@ class ClaudeCodeAPI(APIClientMixin):
         for block in system_messages:
             block.pop("cache_control", None)
         for block in system_messages[-2:]:
-            block["cache_control"] = {"type": "ephemeral"}
+            block["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
 
     @staticmethod
     def _add_message_cache_control(messages_dicts: list[dict[str, Any]]) -> None:
@@ -275,8 +275,7 @@ class ClaudeCodeAPI(APIClientMixin):
         # Build request body - convert messages to Claude format
         # (handles sessions created with OpenAI/Codex APIs)
         messages_dicts: list[dict[str, Any]] = [
-            dict(convert_message_to_claude_format(msg.to_dict()))
-            for msg in messages
+            dict(convert_message_to_claude_format(msg.to_dict())) for msg in messages
         ]
 
         # Prompt caching: use up to 4 breakpoints total (matching Claude Code):

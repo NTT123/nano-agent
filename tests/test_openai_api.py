@@ -15,7 +15,7 @@ from nano_agent import (
     ToolUseContent,
     Usage,
 )
-from nano_agent.openai_api import (
+from nano_agent.providers.openai import (
     OpenAIAPI,
     _map_status_to_stop_reason,
     _parse_arguments,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from nano_agent.codex_auth import (
+from nano_agent.providers.codex_auth import (
     get_codex_access_token,
     get_codex_refresh_token,
     load_codex_auth,

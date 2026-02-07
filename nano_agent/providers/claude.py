@@ -8,8 +8,8 @@ from typing import Any, TypedDict
 
 import httpx
 
-from .dag import DAG
-from .data_structures import (
+from ..dag import DAG
+from ..data_structures import (
     ContentBlock,
     Message,
     Response,
@@ -21,7 +21,7 @@ from .data_structures import (
     Usage,
     convert_message_to_claude_format,
 )
-from .tools import Tool
+from ..tools import Tool
 
 # Re-export for backwards compatibility
 __all__ = [
@@ -137,7 +137,7 @@ class ClaudeAPI:
         for block in system_messages:
             block.pop("cache_control", None)
         for block in system_messages[-2:]:
-            block["cache_control"] = {"type": "ephemeral"}
+            block["cache_control"] = {"type": "ephemeral", "ttl": "1h"}
 
     @staticmethod
     def _add_message_cache_control(messages_dicts: list[dict[str, Any]]) -> None:
@@ -208,8 +208,7 @@ class ClaudeAPI:
         # Build request body - convert messages to Claude format
         # (handles sessions created with OpenAI/Codex APIs)
         messages_dicts: list[dict[str, Any]] = [
-            dict(convert_message_to_claude_format(msg.to_dict()))
-            for msg in messages
+            dict(convert_message_to_claude_format(msg.to_dict())) for msg in messages
         ]
 
         # Prompt caching: use up to 4 breakpoints total (matching Claude Code):
@@ -238,7 +237,7 @@ class ClaudeAPI:
 if __name__ == "__main__":
     import asyncio
 
-    from .tools import BashTool, ReadTool
+    from ..tools import BashTool, ReadTool
 
     async def main() -> None:
         # Uses ANTHROPIC_API_KEY from environment

@@ -13,7 +13,7 @@ from nano_agent import (
     ToolResultContent,
     ToolUseContent,
 )
-from nano_agent.codex_api import (
+from nano_agent.providers.codex import (
     CodexAPI,
     _map_status_to_stop_reason,
     _parse_arguments,
@@ -242,6 +242,8 @@ class TestCodexAPIInitErrors:
     def test_init_without_token_raises(self) -> None:
         from unittest.mock import patch
 
-        with patch("nano_agent.codex_api.get_codex_access_token", return_value=None):
+        with patch(
+            "nano_agent.providers.codex.get_codex_access_token", return_value=None
+        ):
             with pytest.raises(ValueError, match="Codex OAuth token required"):
                 CodexAPI(auth_token=None)

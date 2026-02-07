@@ -13,8 +13,8 @@ from typing import Any, Protocol, Self
 
 import httpx
 
-from .dag import DAG
-from .data_structures import Response
+from ..dag import DAG
+from ..data_structures import Response
 
 __all__ = ["APIError", "APIClientMixin", "APIProtocol"]
 

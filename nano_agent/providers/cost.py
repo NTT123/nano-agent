@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from .data_structures import Usage
+from ..data_structures import Usage
 
 __all__ = [
     "ModelPricing",

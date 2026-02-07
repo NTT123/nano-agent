@@ -17,7 +17,7 @@ from nano_agent import (
     ToolUseContent,
     Usage,
 )
-from nano_agent.gemini_api import GeminiAPI, _map_finish_reason
+from nano_agent.providers.gemini import GeminiAPI, _map_finish_reason
 from nano_agent.tools import Tool
 
 

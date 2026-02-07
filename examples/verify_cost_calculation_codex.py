@@ -1,29 +1,44 @@
-"""Verify cost calculation against real Claude Code API usage.
+"""Verify cost calculation against real Codex (OpenAI) API usage.
 
-Makes real API calls to verify input/output token costs AND prompt caching.
-Uses a large system prompt (>4096 tokens) to meet the caching minimum for
-Opus 4.6, so Turn 1 triggers cache_creation and Turns 2-3 trigger cache_read.
+Makes real API calls to verify input/output token costs and reasoning tokens
+using the OpenAI cost formula.
+
+OpenAI billing:
+  - input_tokens INCLUDES cached_tokens
+  - Uncached input: (input_tokens - cached_tokens) at input rate
+  - Cached input: cached_tokens at reduced cached_input rate
+  - output_tokens INCLUDES reasoning_tokens
+  - Non-reasoning output: (output_tokens - reasoning_tokens) at output rate
+  - Reasoning: reasoning_tokens at reasoning rate
 
 Also uses synthetic Usage objects to verify formulas for edge cases.
 
-Scenarios:
-  Part 1 — Real API calls (with prompt caching)
-    Turn 1: First call  → cache_creation (system prompt written to cache)
-    Turn 2: Follow-up   → cache_read (system prompt + Turn 1 read from cache)
-    Turn 3: Follow-up   → cache_read (system prompt + Turns 1-2 read from cache)
+Note on caching: The Codex endpoint (chatgpt.com) requires the `instructions`
+parameter, which does NOT participate in OpenAI prefix caching.  cached_tokens
+will always be 0 from this endpoint.  To get real cached_tokens, use OpenAIAPI
+with the standard API (api.openai.com), which passes the system prompt as a
+developer message in the input array.  The cached_tokens formula is verified
+via synthetic scenarios instead.
 
-  Part 2 — Synthetic scenarios (cache_write + cache_read)
-    Scenario A: Large cache write
-    Scenario B: Cache read
-    Scenario C: Mixed cache_write + cache_read + normal input
+Scenarios:
+  Part 1 — Real API calls (reasoning tokens)
+    Turn 1: First call  → expect reasoning_tokens for algorithmic question
+    Turn 2: Follow-up   → reasoning for optimization question
+    Turn 3: Follow-up   → reasoning for test-writing question
+
+  Part 2 — Synthetic scenarios
+    Scenario A: With cached_tokens only
+    Scenario B: With reasoning_tokens only
+    Scenario C: Mixed cached + reasoning
+    Scenario D: No caching, no reasoning (e.g., gpt-4.1)
 
 Run:
-    uv run python examples/verify_cost_calculation.py
+    uv run python examples/verify_cost_calculation_codex.py
 """
 
 import asyncio
 
-from nano_agent import DAG, ClaudeCodeAPI, Usage
+from nano_agent import CodexAPI, DAG, Usage
 from nano_agent.providers.cost import (
     CostBreakdown,
     calculate_cost,
@@ -34,10 +49,11 @@ from nano_agent.providers.cost import (
 
 SEPARATOR = "─" * 70
 
-# A large system prompt (~5000 tokens) to exceed the 4096-token caching
-# minimum for Opus 4.6.  This is a realistic coding assistant prompt.
+# A detailed system prompt.  Includes "think step by step" instruction so
+# harder questions are more likely to produce reasoning_tokens.
 LARGE_SYSTEM_PROMPT = """\
-You are an expert software engineering assistant. Be concise. Reply in 1-2 sentences.
+You are an expert software engineering assistant. Think step by step for
+complex problems.  Be concise but thorough.
 
 # Code Review Guidelines
 
@@ -115,33 +131,6 @@ When reviewing code, follow these principles:
 - Never commit secrets or credentials
 - Review your own PR before requesting review
 
-## API Design
-- Use consistent naming conventions
-- Version your APIs from the start
-- Return appropriate HTTP status codes
-- Implement pagination for list endpoints
-- Use standard error response format
-- Document with OpenAPI/Swagger
-- Implement idempotency for write operations
-- Use ETags for caching
-
-## Database Design
-- Normalize to 3NF, denormalize for performance
-- Use migrations for schema changes
-- Index columns used in WHERE and JOIN clauses
-- Use transactions for multi-step operations
-- Implement soft deletes for audit trails
-- Use UUIDs for public-facing IDs
-- Partition large tables by time or category
-
-## Monitoring and Observability
-- Structured logging with correlation IDs
-- Track key business metrics
-- Set up alerts for error rate spikes
-- Distributed tracing for microservices
-- Health check endpoints for all services
-- Monitor resource usage (CPU, memory, disk, network)
-
 ## Error Handling
 - Use domain-specific exception hierarchies
 - Include context in error messages
@@ -160,64 +149,53 @@ When reviewing code, follow these principles:
 - Implement graceful shutdown for long-running tasks
 - Use semaphores to limit concurrent resource usage
 
-## Deployment
-- Use environment variables for configuration
-- Implement health checks and readiness probes
-- Use rolling deployments for zero downtime
-- Implement feature flags for gradual rollouts
-- Containerize applications with minimal base images
-- Use multi-stage builds to reduce image size
-- Implement graceful shutdown handling
-- Log to stdout/stderr, let the platform handle aggregation
-
-## Code Organization
-- Group by feature, not by type
-- Keep modules small and focused
-- Use __init__.py to define public API
-- Separate configuration from code
-- Use abstract base classes for interfaces
-- Keep import graphs acyclic
-- Put constants near their usage, not in global files
-
-Remember: Always be concise. Reply in 1-2 sentences maximum.
+Remember: Think step by step for complex problems, but keep answers concise.
 """
 
 
-def manual_anthropic_cost(usage: Usage, model: str) -> CostBreakdown:
-    """Calculate cost manually from published Anthropic pricing.
+def manual_openai_cost(usage: Usage, model: str) -> CostBreakdown:
+    """Calculate cost manually from published OpenAI pricing.
 
     Intentionally separate from calculate_cost() so we can compare.
 
-    Anthropic billing:
-      - input_tokens does NOT include cached tokens
-      - cache_creation at 1.25x input rate
-      - cache_read at 0.1x input rate
+    OpenAI billing:
+      - input_tokens INCLUDES cached_tokens
+      - output_tokens INCLUDES reasoning_tokens
     """
     pricing = get_pricing(model)
     if pricing is None:
         return CostBreakdown()
 
-    inp = usage.input_tokens * pricing.input_per_mtok / 1_000_000
-    out = usage.output_tokens * pricing.output_per_mtok / 1_000_000
-    cw = usage.cache_creation_input_tokens * pricing.cache_write_per_mtok / 1_000_000
-    cr = usage.cache_read_input_tokens * pricing.cache_read_per_mtok / 1_000_000
+    # Input: split into uncached + cached
+    uncached_input = max(0, usage.input_tokens - usage.cached_tokens)
+    inp = uncached_input * pricing.input_per_mtok / 1_000_000
+    inp += usage.cached_tokens * pricing.cached_input_per_mtok / 1_000_000
+
+    # Output: split into non-reasoning + reasoning
+    if pricing.reasoning_per_mtok and usage.reasoning_tokens:
+        non_reasoning = max(0, usage.output_tokens - usage.reasoning_tokens)
+        out = non_reasoning * pricing.output_per_mtok / 1_000_000
+        reas = usage.reasoning_tokens * pricing.reasoning_per_mtok / 1_000_000
+    else:
+        out = usage.output_tokens * pricing.output_per_mtok / 1_000_000
+        reas = 0.0
 
     return CostBreakdown(
         input_cost=inp,
         output_cost=out,
-        cache_write_cost=cw,
-        cache_read_cost=cr,
-        total_cost=inp + out + cw + cr,
+        reasoning_cost=reas,
+        total_cost=inp + out + reas,
     )
 
 
 def print_usage(usage: Usage) -> None:
     """Print raw token counts."""
     print("  Raw token counts:")
-    print(f"    input_tokens:                {usage.input_tokens:>8,}")
-    print(f"    output_tokens:               {usage.output_tokens:>8,}")
-    print(f"    cache_creation_input_tokens: {usage.cache_creation_input_tokens:>8,}")
-    print(f"    cache_read_input_tokens:     {usage.cache_read_input_tokens:>8,}")
+    print(f"    input_tokens:       {usage.input_tokens:>8,}")
+    print(f"    output_tokens:      {usage.output_tokens:>8,}")
+    print(f"    cached_tokens:      {usage.cached_tokens:>8,}")
+    print(f"    reasoning_tokens:   {usage.reasoning_tokens:>8,}")
+    print(f"    total_tokens:       {usage.total_tokens:>8,}")
 
 
 def print_cost_comparison(
@@ -227,28 +205,22 @@ def print_cost_comparison(
     pricing = get_pricing(model)
     if pricing:
         print(f"  Pricing ({model}):")
-        rates = [
-            f"input=${pricing.input_per_mtok}",
-            f"output=${pricing.output_per_mtok}",
-        ]
-        if pricing.cache_write_per_mtok:
-            rates.append(f"cache_write=${pricing.cache_write_per_mtok}")
-        if pricing.cache_read_per_mtok:
-            rates.append(f"cache_read=${pricing.cache_read_per_mtok}")
+        rates = [f"input=${pricing.input_per_mtok}", f"output=${pricing.output_per_mtok}"]
+        if pricing.cached_input_per_mtok:
+            rates.append(f"cached_input=${pricing.cached_input_per_mtok}")
+        if pricing.reasoning_per_mtok:
+            rates.append(f"reasoning=${pricing.reasoning_per_mtok}")
         print(f"    {', '.join(rates)}  (per MTok)")
 
     print()
-    header = (
-        f"  {'Category':<20} {'calculate_cost()':>16} {'manual_calc':>16} {'match':>6}"
-    )
+    header = f"  {'Category':<20} {'calculate_cost()':>16} {'manual_calc':>16} {'match':>6}"
     print(header)
     print(f"  {'─' * 20} {'─' * 16} {'─' * 16} {'─' * 6}")
 
     rows = [
         ("input_cost", computed.input_cost, manual.input_cost),
         ("output_cost", computed.output_cost, manual.output_cost),
-        ("cache_write_cost", computed.cache_write_cost, manual.cache_write_cost),
-        ("cache_read_cost", computed.cache_read_cost, manual.cache_read_cost),
+        ("reasoning_cost", computed.reasoning_cost, manual.reasoning_cost),
         ("total_cost", computed.total_cost, manual.total_cost),
     ]
     all_match = True
@@ -259,9 +231,7 @@ def print_cost_comparison(
         if not match:
             all_match = False
         mark = "✓" if match else "✗"
-        print(
-            f"  {label:<20} {format_cost(c_val):>16} {format_cost(m_val):>16} {mark:>6}"
-        )
+        print(f"  {label:<20} {format_cost(c_val):>16} {format_cost(m_val):>16} {mark:>6}")
 
     print()
     if all_match:
@@ -277,28 +247,23 @@ def print_manual_formula(usage: Usage, model: str) -> None:
     if not pricing:
         return
     print("  Manual arithmetic:")
-    if usage.input_tokens:
-        val = usage.input_tokens * pricing.input_per_mtok / 1_000_000
-        print(
-            f"    input:       {usage.input_tokens:,} × ${pricing.input_per_mtok}/MTok = {format_cost(val)}"
-        )
-    if usage.output_tokens:
+    uncached = max(0, usage.input_tokens - usage.cached_tokens)
+    if uncached:
+        val = uncached * pricing.input_per_mtok / 1_000_000
+        print(f"    uncached input: {uncached:,} × ${pricing.input_per_mtok}/MTok = {format_cost(val)}")
+    if usage.cached_tokens:
+        val = usage.cached_tokens * pricing.cached_input_per_mtok / 1_000_000
+        print(f"    cached input:   {usage.cached_tokens:,} × ${pricing.cached_input_per_mtok}/MTok = {format_cost(val)}")
+    if pricing.reasoning_per_mtok and usage.reasoning_tokens:
+        non_reasoning = max(0, usage.output_tokens - usage.reasoning_tokens)
+        if non_reasoning:
+            val = non_reasoning * pricing.output_per_mtok / 1_000_000
+            print(f"    output:         {non_reasoning:,} × ${pricing.output_per_mtok}/MTok = {format_cost(val)}")
+        val = usage.reasoning_tokens * pricing.reasoning_per_mtok / 1_000_000
+        print(f"    reasoning:      {usage.reasoning_tokens:,} × ${pricing.reasoning_per_mtok}/MTok = {format_cost(val)}")
+    elif usage.output_tokens:
         val = usage.output_tokens * pricing.output_per_mtok / 1_000_000
-        print(
-            f"    output:      {usage.output_tokens:,} × ${pricing.output_per_mtok}/MTok = {format_cost(val)}"
-        )
-    if usage.cache_creation_input_tokens:
-        val = (
-            usage.cache_creation_input_tokens * pricing.cache_write_per_mtok / 1_000_000
-        )
-        print(
-            f"    cache_write: {usage.cache_creation_input_tokens:,} × ${pricing.cache_write_per_mtok}/MTok = {format_cost(val)}"
-        )
-    if usage.cache_read_input_tokens:
-        val = usage.cache_read_input_tokens * pricing.cache_read_per_mtok / 1_000_000
-        print(
-            f"    cache_read:  {usage.cache_read_input_tokens:,} × ${pricing.cache_read_per_mtok}/MTok = {format_cost(val)}"
-        )
+        print(f"    output:         {usage.output_tokens:,} × ${pricing.output_per_mtok}/MTok = {format_cost(val)}")
 
 
 def verify_turn(
@@ -306,37 +271,23 @@ def verify_turn(
     response_text: str,
     usage: Usage,
     model: str,
-    expect_cache_write: bool = False,
-    expect_cache_read: bool = False,
 ) -> tuple[bool, float]:
     """Print and verify a single turn. Returns (ok, cost)."""
-    print(
-        f"  Response: {response_text[:120]}{'...' if len(response_text) > 120 else ''}"
-    )
+    print(f"  Response: {response_text[:120]}{'...' if len(response_text) > 120 else ''}")
     print_usage(usage)
-
-    # Check caching expectations
-    if expect_cache_write and usage.cache_creation_input_tokens == 0:
-        print(
-            "  ⚠ Expected cache_creation_input_tokens > 0 (prompt may be below 4096-token minimum)"
-        )
-    if expect_cache_read and usage.cache_read_input_tokens == 0:
-        print(
-            "  ⚠ Expected cache_read_input_tokens > 0 (cache may have expired or not been created)"
-        )
 
     print()
     print_manual_formula(usage, model)
 
     computed = calculate_cost(usage, model=model)
-    manual = manual_anthropic_cost(usage, model)
+    manual = manual_openai_cost(usage, model)
     print()
     ok = print_cost_comparison(computed, manual, model)
     return ok, computed.total_cost
 
 
 async def main() -> None:
-    api = ClaudeCodeAPI()
+    api = CodexAPI()
     model = api.model
     provider = get_provider_for_model(model)
     print(f"Model: {model}")
@@ -346,132 +297,141 @@ async def main() -> None:
     cumulative_cost = 0.0
 
     # =====================================================================
-    # Part 1: Real API calls with prompt caching
+    # Part 1: Real API calls
     # =====================================================================
     print(f"\n{'═' * 70}")
-    print("  PART 1: Real API Calls (with prompt caching)")
+    print("  PART 1: Real API Calls (with reasoning)")
     print(f"{'═' * 70}")
-    print(f"  System prompt is ~5000 tokens to exceed the 4096-token caching minimum.")
+    print("  Note: Codex endpoint requires `instructions` (no cached_tokens).")
+    print("  Harder questions to trigger reasoning_tokens.")
 
-    # ── Turn 1: should trigger cache_creation ──
-    print(f"\n[Turn 1] First call (expect cache_creation for system prompt)")
+    # ── Turn 1 ──
+    print(f"\n[Turn 1] First call (expect reasoning for algorithmic question)")
     print(SEPARATOR)
     dag = DAG().system(LARGE_SYSTEM_PROMPT)
-    dag = dag.user("What is the capital of France?")
+    dag = dag.user(
+        "Write a Python function to find the longest increasing subsequence "
+        "in a list of integers. What is the time complexity? Keep it under "
+        "20 lines."
+    )
     response = await api.send(dag)
     dag = dag.assistant(response.content)
 
-    ok, cost = verify_turn(
-        "Turn 1",
-        response.get_text(),
-        response.usage,
-        model,
-        expect_cache_write=True,
-    )
+    ok, cost = verify_turn("Turn 1", response.get_text(), response.usage, model)
     if not ok:
         all_ok = False
     cumulative_cost += cost
 
-    # ── Turn 2: should trigger cache_read ──
-    print(f"\n[Turn 2] Follow-up (expect cache_read for system prompt + Turn 1)")
-    print(SEPARATOR)
-    dag = dag.user("And what is the population of that city?")
-    response = await api.send(dag)
-    dag = dag.assistant(response.content)
-
-    ok, cost = verify_turn(
-        "Turn 2",
-        response.get_text(),
-        response.usage,
-        model,
-        expect_cache_read=True,
-    )
-    if not ok:
-        all_ok = False
-    cumulative_cost += cost
-
-    # ── Turn 3: should trigger cache_read ──
-    print(f"\n[Turn 3] Another follow-up (expect cache_read for system + Turns 1-2)")
+    # ── Turn 2 ──
+    print(f"\n[Turn 2] Follow-up (expect reasoning for optimization question)")
     print(SEPARATOR)
     dag = dag.user(
-        "Compare Paris vs London in detail: population, area, GDP, landmarks, "
-        "and public transport. Use 3-4 sentences."
+        "Now optimize it to O(n log n) using binary search. Show the code "
+        "and explain the key insight."
     )
     response = await api.send(dag)
     dag = dag.assistant(response.content)
 
-    ok, cost = verify_turn(
-        "Turn 3",
-        response.get_text(),
-        response.usage,
-        model,
-        expect_cache_read=True,
+    ok, cost = verify_turn("Turn 2", response.get_text(), response.usage, model)
+    if not ok:
+        all_ok = False
+    cumulative_cost += cost
+
+    # ── Turn 3 ──
+    print(f"\n[Turn 3] Follow-up (expect reasoning for test-writing question)")
+    print(SEPARATOR)
+    dag = dag.user(
+        "Write comprehensive pytest tests for both implementations. Include "
+        "edge cases: empty list, single element, all decreasing, all equal, "
+        "and a large random input."
     )
+    response = await api.send(dag)
+    dag = dag.assistant(response.content)
+
+    ok, cost = verify_turn("Turn 3", response.get_text(), response.usage, model)
     if not ok:
         all_ok = False
     cumulative_cost += cost
 
     # =====================================================================
-    # Part 2: Synthetic scenarios (cache_write + cache_read)
+    # Part 2: Synthetic scenarios
     # =====================================================================
     print(f"\n{'═' * 70}")
-    print("  PART 2: Synthetic Scenarios (cache_write + cache_read)")
+    print("  PART 2: Synthetic Scenarios")
     print(f"{'═' * 70}")
     print("  (Using synthetic Usage to verify formulas)")
 
-    # ── Scenario A: Large cache write ──
-    print(f"\n[Scenario A] Cache write: 50k input, 10k cache_creation, 1k output")
+    # ── Scenario A: Cached tokens ──
+    print(f"\n[Scenario A] Cached tokens: 10k input (4k cached), 2k output, no reasoning")
     print(SEPARATOR)
     usage_a = Usage(
-        input_tokens=50_000,
-        output_tokens=1_000,
-        cache_creation_input_tokens=10_000,
+        input_tokens=10_000,
+        output_tokens=2_000,
+        cached_tokens=4_000,
     )
     print_usage(usage_a)
     print()
     print_manual_formula(usage_a, model)
 
     computed = calculate_cost(usage_a, model=model)
-    manual = manual_anthropic_cost(usage_a, model)
+    manual = manual_openai_cost(usage_a, model)
     print()
     if not print_cost_comparison(computed, manual, model):
         all_ok = False
 
-    # ── Scenario B: Cache read ──
-    print(f"\n[Scenario B] Cache read: 5k input, 45k cache_read, 2k output")
+    # ── Scenario B: Reasoning tokens ──
+    print(f"\n[Scenario B] Reasoning tokens: 5k input, 3k output (1k reasoning)")
     print(SEPARATOR)
     usage_b = Usage(
         input_tokens=5_000,
-        output_tokens=2_000,
-        cache_read_input_tokens=45_000,
+        output_tokens=3_000,
+        reasoning_tokens=1_000,
     )
     print_usage(usage_b)
     print()
     print_manual_formula(usage_b, model)
 
     computed = calculate_cost(usage_b, model=model)
-    manual = manual_anthropic_cost(usage_b, model)
+    manual = manual_openai_cost(usage_b, model)
     print()
     if not print_cost_comparison(computed, manual, model):
         all_ok = False
 
-    # ── Scenario C: Mixed ──
-    print(f"\n[Scenario C] Mixed: 20k input, 5k cache_write, 30k cache_read, 3k output")
+    # ── Scenario C: Mixed cached + reasoning ──
+    print(f"\n[Scenario C] Mixed: 20k input (8k cached), 5k output (2k reasoning)")
     print(SEPARATOR)
     usage_c = Usage(
         input_tokens=20_000,
-        output_tokens=3_000,
-        cache_creation_input_tokens=5_000,
-        cache_read_input_tokens=30_000,
+        output_tokens=5_000,
+        cached_tokens=8_000,
+        reasoning_tokens=2_000,
     )
     print_usage(usage_c)
     print()
     print_manual_formula(usage_c, model)
 
     computed = calculate_cost(usage_c, model=model)
-    manual = manual_anthropic_cost(usage_c, model)
+    manual = manual_openai_cost(usage_c, model)
     print()
     if not print_cost_comparison(computed, manual, model):
+        all_ok = False
+
+    # ── Scenario D: No caching, no reasoning (like gpt-4.1) ──
+    gpt41_model = "gpt-4.1"
+    print(f"\n[Scenario D] No caching, no reasoning ({gpt41_model}): 10k input, 3k output")
+    print(SEPARATOR)
+    usage_d = Usage(
+        input_tokens=10_000,
+        output_tokens=3_000,
+    )
+    print_usage(usage_d)
+    print()
+    print_manual_formula(usage_d, gpt41_model)
+
+    computed = calculate_cost(usage_d, model=gpt41_model)
+    manual = manual_openai_cost(usage_d, gpt41_model)
+    print()
+    if not print_cost_comparison(computed, manual, gpt41_model):
         all_ok = False
 
     # =====================================================================
@@ -480,7 +440,7 @@ async def main() -> None:
     print(f"\n{'═' * 70}")
     print(f"  Cumulative real API cost (3 turns): {format_cost(cumulative_cost)}")
     if all_ok:
-        print("  ✓ All 6 scenarios passed!")
+        print("  ✓ All 7 scenarios passed!")
     else:
         print("  ✗ Some scenarios failed — check above for details")
     print(f"{'═' * 70}")

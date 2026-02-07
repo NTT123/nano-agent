@@ -13,8 +13,7 @@ How it works:
 5. Optionally saves captured config to ~/.nano-agent.json
 
 Usage:
-    from nano_agent import get_config, get_headers, get_auth_token
-    from nano_agent import load_config, save_config, config_exists
+    from nano_agent import get_config, get_headers, load_config, save_config
 
     # Capture and save (default)
     headers, body_params = get_config()

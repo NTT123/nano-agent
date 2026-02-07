@@ -544,7 +544,7 @@ def format_token_count(
 
     # Add cost if present
     if cost > 0:
-        from nano_agent.cost import format_cost
+        from nano_agent.providers.cost import format_cost
 
         result.append(" ", style="dim")
         result.append(f"Cost: {format_cost(cost)}", style="yellow")

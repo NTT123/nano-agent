@@ -9,9 +9,8 @@ from typing import Any
 
 import httpx
 
-from .codex_auth import get_codex_access_token
-from .dag import DAG
-from .data_structures import (
+from ..dag import DAG
+from ..data_structures import (
     ContentBlock,
     Message,
     Response,
@@ -22,7 +21,8 @@ from .data_structures import (
     ToolUseContent,
     Usage,
 )
-from .tools import Tool
+from ..tools import Tool
+from .codex_auth import get_codex_access_token
 
 __all__ = ["CodexAPI"]
 
@@ -172,6 +172,10 @@ class CodexAPI:
             if dag_system_prompts:
                 system_prompt = "\n\n".join(dag_system_prompts)
 
+        # Codex endpoint requires the `instructions` field.
+        # Note: `instructions` does not participate in OpenAI prefix caching.
+        # Caching with cached_tokens only works on the standard OpenAI API
+        # (api.openai.com) using developer messages in the input array.
         input_items: list[dict[str, Any]] = []
         for msg in messages:
             input_items.extend(self._convert_message_to_codex(msg))

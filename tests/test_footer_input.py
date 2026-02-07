@@ -150,7 +150,11 @@ class TestMultilineRendering:
             for line in lines[1:]:
                 stripped = ANSI.strip_ansi(line)
                 # Should NOT start with 2 spaces (prompt width)
-                assert not stripped.startswith("  ") or stripped.startswith("  ") and stripped[2:3] != ""
+                assert (
+                    not stripped.startswith("  ")
+                    or stripped.startswith("  ")
+                    and stripped[2:3] != ""
+                )
 
     def test_empty_input_shows_cursor(self) -> None:
         """Empty input should show cursor character."""

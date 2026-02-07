@@ -1,4 +1,4 @@
-"""Tests for shared API infrastructure (api_base module)."""
+"""Tests for shared API infrastructure (providers.base module)."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from nano_agent.api_base import APIClientMixin, APIError
+from nano_agent.providers.base import APIClientMixin, APIError
 
 
 class TestAPIError:

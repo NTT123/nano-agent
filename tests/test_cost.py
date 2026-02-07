@@ -2,7 +2,8 @@
 
 import pytest
 
-from nano_agent.cost import (
+from nano_agent.data_structures import Usage
+from nano_agent.providers.cost import (
     CostBreakdown,
     ModelPricing,
     calculate_cost,
@@ -10,7 +11,6 @@ from nano_agent.cost import (
     get_pricing,
     get_provider_for_model,
 )
-from nano_agent.data_structures import Usage
 
 
 class TestGetProviderForModel:
