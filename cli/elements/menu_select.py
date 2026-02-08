@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from .base import ActiveElement, InputEvent
+from .terminal import ANSI
 
 
 @dataclass
@@ -27,20 +28,28 @@ class MenuSelect(ActiveElement[str | list[str] | None]):
     selected_indices: set[int] = field(default_factory=set)
 
     def get_lines(self) -> list[str]:
-        lines = [self.title]
+        terminal_width = max(1, ANSI.get_terminal_width())
+
+        result: list[str] = []
+        # Wrap title to terminal width
+        result.extend(ANSI.wrap_to_width(self.title, terminal_width))
+
         for i, opt in enumerate(self.options):
             cursor = "→ " if i == self.selected else "  "
             if self.multi_select:
                 mark = "[x]" if i in self.selected_indices else "[ ]"
-                lines.append(f"{cursor}{mark} {opt}")
+                line = f"{cursor}{mark} {opt}"
             else:
-                lines.append(f"{cursor}{opt}")
-        lines.append("")
+                line = f"{cursor}{opt}"
+            result.extend(ANSI.wrap_to_width(line, terminal_width))
+
+        result.append("")
         if self.multi_select:
-            lines.append("[↑/↓] move  [Space] toggle  [Enter] confirm  [Esc] cancel")
+            hint = "[↑/↓] move  [Space] toggle  [Enter] confirm  [Esc] cancel"
         else:
-            lines.append("[↑/↓] move  [Enter] select  [Esc] cancel")
-        return lines
+            hint = "[↑/↓] move  [Enter] select  [Esc] cancel"
+        result.extend(ANSI.wrap_to_width(hint, terminal_width))
+        return result
 
     def handle_input(self, event: InputEvent) -> tuple[bool, str | list[str] | None]:
         if event.key == "Enter":
