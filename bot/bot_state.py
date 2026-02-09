@@ -98,7 +98,9 @@ class BotState:
     active_channel: discord.abc.Messageable | None = None
     active_channel_id: int | None = None
     clear_context_requested: set[int] = field(default_factory=set)
-    channel_message_queues: dict[int, list[dict[str, Any]]] = field(default_factory=dict)
+    channel_message_queues: dict[int, list[dict[str, Any]]] = field(
+        default_factory=dict
+    )
     channel_queue_seq: dict[int, int] = field(default_factory=dict)
     channel_last_user_id: dict[int, int] = field(default_factory=dict)
     channel_worker_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
@@ -122,9 +124,17 @@ class BotState:
 
     # -- session management --
 
-    def get_session(self, channel_id: int, cwd: str | None = None, system_prompt: str = "", tools: list[Any] | None = None) -> DAG:
+    def get_session(
+        self,
+        channel_id: int,
+        cwd: str | None = None,
+        system_prompt: str = "",
+        tools: list[Any] | None = None,
+    ) -> DAG:
         if channel_id not in self.sessions:
-            self.sessions[channel_id] = self.create_session(cwd, system_prompt=system_prompt, tools=tools)
+            self.sessions[channel_id] = self.create_session(
+                cwd, system_prompt=system_prompt, tools=tools
+            )
         return self.sessions[channel_id]
 
     def set_session(self, channel_id: int, dag: DAG) -> None:
@@ -152,11 +162,15 @@ class BotState:
 
     def get_channel_queue(self, channel_id: int) -> list[dict[str, Any]]:
         if channel_id not in self.channel_message_queues:
-            self.channel_message_queues[channel_id] = self._load_channel_queue(channel_id)
+            self.channel_message_queues[channel_id] = self._load_channel_queue(
+                channel_id
+            )
         return self.channel_message_queues[channel_id]
 
     def _next_queue_id(self, channel_id: int) -> int:
-        self.channel_queue_seq[channel_id] = self.channel_queue_seq.get(channel_id, 0) + 1
+        self.channel_queue_seq[channel_id] = (
+            self.channel_queue_seq.get(channel_id, 0) + 1
+        )
         return self.channel_queue_seq[channel_id]
 
     def enqueue_user_message(
@@ -178,11 +192,15 @@ class BotState:
         self.append_internal_log(channel_id, "user_message_enqueued", queued)
         return queued
 
-    def peek_user_messages(self, channel_id: int, limit: int = 5) -> list[dict[str, Any]]:
+    def peek_user_messages(
+        self, channel_id: int, limit: int = 5
+    ) -> list[dict[str, Any]]:
         queue = self.get_channel_queue(channel_id)
         return [dict(item) for item in queue[: max(1, min(limit, 50))]]
 
-    def dequeue_user_messages(self, channel_id: int, count: int = 1) -> list[dict[str, Any]]:
+    def dequeue_user_messages(
+        self, channel_id: int, count: int = 1
+    ) -> list[dict[str, Any]]:
         queue = self.get_channel_queue(channel_id)
         take = max(1, min(count, 20))
         items = [queue.pop(0) for _ in range(min(take, len(queue)))]
@@ -205,7 +223,9 @@ class BotState:
 
     # -- notifications --
 
-    def _format_queue_preview(self, channel_id: int, limit: int = 5, max_content_len: int = 140) -> list[str]:
+    def _format_queue_preview(
+        self, channel_id: int, limit: int = 5, max_content_len: int = 140
+    ) -> list[str]:
         """Shared preview rendering for queue notifications."""
         queue = self.get_channel_queue(channel_id)
         lines: list[str] = []
@@ -227,7 +247,9 @@ class BotState:
                 "If you need to communicate with the user, call SendUserMessage."
             )
 
-        preview_text = "\n".join(self._format_queue_preview(channel_id, limit=5, max_content_len=140))
+        preview_text = "\n".join(
+            self._format_queue_preview(channel_id, limit=5, max_content_len=140)
+        )
         return (
             "Runtime queue status: there are queued user messages waiting.\n"
             f"Pending count: {len(queue)}.\n"
@@ -238,7 +260,9 @@ class BotState:
             f"{preview_text}"
         )
 
-    def format_queue_notification_for_dag(self, channel_id: int, limit: int = 10) -> str:
+    def format_queue_notification_for_dag(
+        self, channel_id: int, limit: int = 10
+    ) -> str:
         """Render queued-message notification as a synthetic user message."""
         queue = self.get_channel_queue(channel_id)
         bounded = max(1, min(limit, 20))
@@ -246,7 +270,9 @@ class BotState:
             f"Runtime notification: there are {len(queue)} queued user messages pending.",
             "Queued message preview:",
         ]
-        lines.extend(self._format_queue_preview(channel_id, limit=bounded, max_content_len=160))
+        lines.extend(
+            self._format_queue_preview(channel_id, limit=bounded, max_content_len=160)
+        )
         lines.append(
             "Use DequeueUserMessages to consume messages, or PeekQueuedUserMessages for details."
         )
@@ -333,7 +359,9 @@ class BotState:
 
     # -- logging --
 
-    def append_internal_log(self, channel_id: int, event: str, payload: dict[str, Any]) -> None:
+    def append_internal_log(
+        self, channel_id: int, event: str, payload: dict[str, Any]
+    ) -> None:
         """Append an internal event for this channel to persistent jsonl logs."""
         self._ensure_state_dir(channel_id)
         entry = {

@@ -38,7 +38,7 @@ Run:
 
 import asyncio
 
-from nano_agent import CodexAPI, DAG, Usage
+from nano_agent import DAG, CodexAPI, Usage
 from nano_agent.providers.cost import (
     CostBreakdown,
     calculate_cost,
@@ -205,7 +205,10 @@ def print_cost_comparison(
     pricing = get_pricing(model)
     if pricing:
         print(f"  Pricing ({model}):")
-        rates = [f"input=${pricing.input_per_mtok}", f"output=${pricing.output_per_mtok}"]
+        rates = [
+            f"input=${pricing.input_per_mtok}",
+            f"output=${pricing.output_per_mtok}",
+        ]
         if pricing.cached_input_per_mtok:
             rates.append(f"cached_input=${pricing.cached_input_per_mtok}")
         if pricing.reasoning_per_mtok:
@@ -213,7 +216,9 @@ def print_cost_comparison(
         print(f"    {', '.join(rates)}  (per MTok)")
 
     print()
-    header = f"  {'Category':<20} {'calculate_cost()':>16} {'manual_calc':>16} {'match':>6}"
+    header = (
+        f"  {'Category':<20} {'calculate_cost()':>16} {'manual_calc':>16} {'match':>6}"
+    )
     print(header)
     print(f"  {'─' * 20} {'─' * 16} {'─' * 16} {'─' * 6}")
 
@@ -231,7 +236,9 @@ def print_cost_comparison(
         if not match:
             all_match = False
         mark = "✓" if match else "✗"
-        print(f"  {label:<20} {format_cost(c_val):>16} {format_cost(m_val):>16} {mark:>6}")
+        print(
+            f"  {label:<20} {format_cost(c_val):>16} {format_cost(m_val):>16} {mark:>6}"
+        )
 
     print()
     if all_match:
@@ -250,20 +257,30 @@ def print_manual_formula(usage: Usage, model: str) -> None:
     uncached = max(0, usage.input_tokens - usage.cached_tokens)
     if uncached:
         val = uncached * pricing.input_per_mtok / 1_000_000
-        print(f"    uncached input: {uncached:,} × ${pricing.input_per_mtok}/MTok = {format_cost(val)}")
+        print(
+            f"    uncached input: {uncached:,} × ${pricing.input_per_mtok}/MTok = {format_cost(val)}"
+        )
     if usage.cached_tokens:
         val = usage.cached_tokens * pricing.cached_input_per_mtok / 1_000_000
-        print(f"    cached input:   {usage.cached_tokens:,} × ${pricing.cached_input_per_mtok}/MTok = {format_cost(val)}")
+        print(
+            f"    cached input:   {usage.cached_tokens:,} × ${pricing.cached_input_per_mtok}/MTok = {format_cost(val)}"
+        )
     if pricing.reasoning_per_mtok and usage.reasoning_tokens:
         non_reasoning = max(0, usage.output_tokens - usage.reasoning_tokens)
         if non_reasoning:
             val = non_reasoning * pricing.output_per_mtok / 1_000_000
-            print(f"    output:         {non_reasoning:,} × ${pricing.output_per_mtok}/MTok = {format_cost(val)}")
+            print(
+                f"    output:         {non_reasoning:,} × ${pricing.output_per_mtok}/MTok = {format_cost(val)}"
+            )
         val = usage.reasoning_tokens * pricing.reasoning_per_mtok / 1_000_000
-        print(f"    reasoning:      {usage.reasoning_tokens:,} × ${pricing.reasoning_per_mtok}/MTok = {format_cost(val)}")
+        print(
+            f"    reasoning:      {usage.reasoning_tokens:,} × ${pricing.reasoning_per_mtok}/MTok = {format_cost(val)}"
+        )
     elif usage.output_tokens:
         val = usage.output_tokens * pricing.output_per_mtok / 1_000_000
-        print(f"    output:         {usage.output_tokens:,} × ${pricing.output_per_mtok}/MTok = {format_cost(val)}")
+        print(
+            f"    output:         {usage.output_tokens:,} × ${pricing.output_per_mtok}/MTok = {format_cost(val)}"
+        )
 
 
 def verify_turn(
@@ -273,7 +290,9 @@ def verify_turn(
     model: str,
 ) -> tuple[bool, float]:
     """Print and verify a single turn. Returns (ok, cost)."""
-    print(f"  Response: {response_text[:120]}{'...' if len(response_text) > 120 else ''}")
+    print(
+        f"  Response: {response_text[:120]}{'...' if len(response_text) > 120 else ''}"
+    )
     print_usage(usage)
 
     print()
@@ -362,7 +381,9 @@ async def main() -> None:
     print("  (Using synthetic Usage to verify formulas)")
 
     # ── Scenario A: Cached tokens ──
-    print(f"\n[Scenario A] Cached tokens: 10k input (4k cached), 2k output, no reasoning")
+    print(
+        f"\n[Scenario A] Cached tokens: 10k input (4k cached), 2k output, no reasoning"
+    )
     print(SEPARATOR)
     usage_a = Usage(
         input_tokens=10_000,
@@ -418,7 +439,9 @@ async def main() -> None:
 
     # ── Scenario D: No caching, no reasoning (like gpt-4.1) ──
     gpt41_model = "gpt-4.1"
-    print(f"\n[Scenario D] No caching, no reasoning ({gpt41_model}): 10k input, 3k output")
+    print(
+        f"\n[Scenario D] No caching, no reasoning ({gpt41_model}): 10k input, 3k output"
+    )
     print(SEPARATOR)
     usage_d = Usage(
         input_tokens=10_000,

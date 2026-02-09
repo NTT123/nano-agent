@@ -84,3 +84,13 @@ disable_error_code = ["misc"]
 module = "cli.app"
 # prompt_toolkit decorator doesn't preserve types
 disable_error_code = ["misc", "untyped-decorator"]
+
+[[tool.mypy.overrides]]
+module = "bot.discord_bot"
+# discord.py decorators don't preserve types
+disable_error_code = ["untyped-decorator"]
+
+[[tool.mypy.overrides]]
+module = "bot.test_bot"
+# Test file: discord.py decorators, mock type mismatches, ToolResult union access
+disable_error_code = ["no-untyped-def", "untyped-decorator", "union-attr", "unused-ignore"]

@@ -12,7 +12,13 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nano_agent import DAG, Role, TextContent
-from nano_agent.data_structures import Message, Response, ToolUseContent, Usage, ContentBlock
+from nano_agent.data_structures import (
+    ContentBlock,
+    Message,
+    Response,
+    ToolUseContent,
+    Usage,
+)
 
 from .bot_state import (
     BotState,
@@ -23,7 +29,6 @@ from .bot_state import (
     truncate,
     utc_now_iso,
 )
-
 
 # ---------------------------------------------------------------------------
 # Mock helpers

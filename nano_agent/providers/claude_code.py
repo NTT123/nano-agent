@@ -37,9 +37,7 @@ def _sha256(s: str) -> str:
     return hashlib.sha256(s.encode()).hexdigest()
 
 
-def compute_billing_header(
-    message_text: str, entrypoint: str = "cli"
-) -> str:
+def compute_billing_header(message_text: str, entrypoint: str = "cli") -> str:
     """Build the x-anthropic-billing-header system message text.
 
     Computes two hashes from the user message:

@@ -10,6 +10,7 @@ Usage:
 
 import json
 import os
+import sys
 import traceback
 
 import discord
@@ -45,10 +46,9 @@ SYSTEM_PROMPT = (
     "use code blocks (```text) with monospace-aligned columns instead."
 )
 
-RESPOND_TO_ALL_MESSAGES = (
-    os.getenv("DISCORD_RESPOND_TO_ALL_MESSAGES", "true").strip().lower()
-    in {"1", "true", "yes", "on"}
-)
+RESPOND_TO_ALL_MESSAGES = os.getenv(
+    "DISCORD_RESPOND_TO_ALL_MESSAGES", "true"
+).strip().lower() in {"1", "true", "yes", "on"}
 
 # --- Discord bot setup ---
 
@@ -71,7 +71,9 @@ state = BotState(bot=bot)
 
 def _create_session(cwd: str | None = None) -> DAG:
     """Helper that wires SYSTEM_PROMPT and tools into state.create_session."""
-    return state.create_session(cwd, system_prompt=SYSTEM_PROMPT, tools=get_tools(state))
+    return state.create_session(
+        cwd, system_prompt=SYSTEM_PROMPT, tools=get_tools(state)
+    )
 
 
 # --- Startup helpers ---
@@ -92,7 +94,9 @@ async def recover_pending_queues() -> None:
                 print(f"[QUEUE_RECOVER] Failed to fetch channel {channel_id}: {e}")
                 continue
 
-        print(f"[QUEUE_RECOVER] Resuming queue for channel {channel_id} (pending={pending})")
+        print(
+            f"[QUEUE_RECOVER] Resuming queue for channel {channel_id} (pending={pending})"
+        )
         ensure_channel_worker(state, api, channel, SYSTEM_PROMPT)
 
 
@@ -131,7 +135,9 @@ async def on_app_command_error(
 # --- Slash commands ---
 
 
-@tree.command(name="clear", description="Clear conversation history in this channel/thread")
+@tree.command(
+    name="clear", description="Clear conversation history in this channel/thread"
+)
 async def clear_command(interaction: discord.Interaction) -> None:
     cwd = state.working_dirs.get(interaction.user.id)
     state.sessions[interaction.channel_id] = _create_session(cwd)
@@ -139,7 +145,9 @@ async def clear_command(interaction: discord.Interaction) -> None:
     await interaction.response.send_message("Conversation cleared.")
 
 
-@tree.command(name="queue", description="Show queued user messages in this channel/thread")
+@tree.command(
+    name="queue", description="Show queued user messages in this channel/thread"
+)
 @app_commands.describe(limit="How many queued messages to preview (1-20)")
 async def queue_command(interaction: discord.Interaction, limit: int = 5) -> None:
     channel_id = interaction.channel_id
@@ -188,7 +196,9 @@ async def cd_command(interaction: discord.Interaction, path: str) -> None:
         return
     state.working_dirs[interaction.user.id] = resolved
     state.sessions[interaction.channel_id] = _create_session(resolved)
-    await interaction.response.send_message(f"Working directory: `{resolved}` (conversation reset)")
+    await interaction.response.send_message(
+        f"Working directory: `{resolved}` (conversation reset)"
+    )
 
 
 @tree.command(name="cwd", description="Show current working directory")
@@ -199,7 +209,9 @@ async def cwd_command(interaction: discord.Interaction) -> None:
 
 @tree.command(name="thread", description="Start a new conversation in a Discord thread")
 @app_commands.describe(topic="Topic for the thread")
-async def thread_command(interaction: discord.Interaction, topic: str = "New conversation") -> None:
+async def thread_command(
+    interaction: discord.Interaction, topic: str = "New conversation"
+) -> None:
     channel = interaction.channel
     if channel is None:
         await interaction.response.send_message("Cannot create thread here.")
@@ -216,7 +228,9 @@ async def thread_command(interaction: discord.Interaction, topic: str = "New con
     cwd = state.working_dirs.get(interaction.user.id)
     state.sessions[thread.id] = _create_session(cwd)
     await interaction.response.send_message(f"Thread created: {thread.mention}")
-    await thread.send(f"New conversation started: **{topic}**\nSend messages here to chat.")
+    await thread.send(
+        f"New conversation started: **{topic}**\nSend messages here to chat."
+    )
 
 
 @tree.command(name="renew", description="Refresh Claude Code OAuth token")
@@ -258,7 +272,6 @@ async def explore_command(
     response = f"```json\n{text}\n```"
     for chunk in chunk_message(response):
         await interaction.followup.send(chunk)
-
 
 
 # --- Message handler ---

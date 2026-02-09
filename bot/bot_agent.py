@@ -5,8 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
+import discord
 import httpx
 
 from nano_agent import DAG, ExecutionContext, Role, TextContent
@@ -17,13 +17,9 @@ from nano_agent.data_structures import (
     ToolExecution,
     ToolResultContent,
 )
-from nano_agent.providers.base import APIError
+from nano_agent.providers.base import APIError, APIProtocol
 
 from .bot_state import BotState, serialize_content_blocks, serialize_text_contents
-
-if TYPE_CHECKING:
-    import discord
-    from nano_agent.providers.base import APIProtocol
 
 
 @dataclass
@@ -124,8 +120,12 @@ async def agent_loop(
             # Accumulate usage
             total_usage["input_tokens"] += response.usage.input_tokens
             total_usage["output_tokens"] += response.usage.output_tokens
-            total_usage["cache_creation_input_tokens"] += response.usage.cache_creation_input_tokens
-            total_usage["cache_read_input_tokens"] += response.usage.cache_read_input_tokens
+            total_usage[
+                "cache_creation_input_tokens"
+            ] += response.usage.cache_creation_input_tokens
+            total_usage[
+                "cache_read_input_tokens"
+            ] += response.usage.cache_read_input_tokens
             stats.stop_reason = response.stop_reason or "unknown"
 
             # Check for tool calls
@@ -134,7 +134,9 @@ async def agent_loop(
                 if pending_before > 0:
                     queue_end_turn_no_tool_count += 1
                     if queue_end_turn_no_tool_count == 1:
-                        dag = dag.user(state.format_queue_notification_for_dag(channel_id))
+                        dag = dag.user(
+                            state.format_queue_notification_for_dag(channel_id)
+                        )
                         state.append_internal_log(
                             channel_id,
                             "queue_notification_injected",
@@ -274,9 +276,7 @@ async def agent_loop(
                     )
 
             # Merge tool results back into DAG
-            merged = Node.with_parents(
-                result_nodes, Message(Role.USER, tool_results)
-            )
+            merged = Node.with_parents(result_nodes, Message(Role.USER, tool_results))
             dag = dag._with_heads((merged,))
     finally:
         if state.active_run_stats is not None:
@@ -298,7 +298,7 @@ def ensure_channel_worker(
     system_prompt: str,
 ) -> None:
     """Ensure exactly one worker is running for this channel."""
-    channel_id = channel.id  # type: ignore[attr-defined]
+    channel_id = channel.id
     existing = state.channel_worker_tasks.get(channel_id)
     if existing is not None and not existing.done():
         return
@@ -320,7 +320,7 @@ async def channel_worker(
     system_prompt: str,
 ) -> None:
     """Process queued messages for a channel until no immediate progress is made."""
-    channel_id = channel.id  # type: ignore[attr-defined]
+    channel_id = channel.id
     passes = 0
     max_passes = 8
 
@@ -388,5 +388,8 @@ async def channel_worker(
     state.append_internal_log(
         channel_id,
         "worker_stopped_max_passes",
-        {"max_passes": max_passes, "remaining_queue": len(state.get_channel_queue(channel_id))},
+        {
+            "max_passes": max_passes,
+            "remaining_queue": len(state.get_channel_queue(channel_id)),
+        },
     )

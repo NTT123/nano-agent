@@ -16,7 +16,6 @@ from nano_agent.tools.base import Desc, Tool, ToolResult
 
 from .bot_state import BotState, chunk_message
 
-
 # --- Helpers ---
 
 
@@ -84,9 +83,9 @@ def build_discord_explore_payload(
         "context": {
             "active_channel_id": getattr(channel, "id", None),
             "active_channel_name": getattr(channel, "name", None),
-            "active_channel_type": type(channel).__name__
-            if channel is not None
-            else None,
+            "active_channel_type": (
+                type(channel).__name__ if channel is not None else None
+            ),
             "active_guild_id": None,
             "active_guild_name": None,
             "active_thread_parent_id": None,
@@ -208,7 +207,9 @@ class ExploreDiscordInput:
 class DiscordAPIInput:
     action: Annotated[
         str,
-        Desc("`discover` to inspect capabilities, or `request` to call Discord REST API"),
+        Desc(
+            "`discover` to inspect capabilities, or `request` to call Discord REST API"
+        ),
     ]
     method: Annotated[
         str,
@@ -231,7 +232,9 @@ class DiscordAPIInput:
 
 @dataclass
 class RestartBotInput:
-    reason: Annotated[str, Desc("Reason for restarting the bot")] = "User requested restart"
+    reason: Annotated[str, Desc("Reason for restarting the bot")] = (
+        "User requested restart"
+    )
 
 
 # --- Tool classes ---
@@ -254,14 +257,18 @@ class SendFileTool(Tool):
     ) -> ToolResult:
         channel = self.state.active_channel
         if channel is None:
-            return ToolResult(content=TextContent(text="Error: No active Discord channel"))
+            return ToolResult(
+                content=TextContent(text="Error: No active Discord channel")
+            )
 
         path = os.path.expanduser(input.file_path)
         if not os.path.isabs(path):
             path = os.path.abspath(path)
 
         if not os.path.isfile(path):
-            return ToolResult(content=TextContent(text=f"Error: File not found: {path}"))
+            return ToolResult(
+                content=TextContent(text=f"Error: File not found: {path}")
+            )
 
         size = os.path.getsize(path)
         if size > 8 * 1024 * 1024:
@@ -278,7 +285,9 @@ class SendFileTool(Tool):
             file = discord.File(path, filename=os.path.basename(path))
             await channel.send(content=input.message or None, file=file)
             return ToolResult(
-                content=TextContent(text=f"File sent: {os.path.basename(path)} ({size} bytes)")
+                content=TextContent(
+                    text=f"File sent: {os.path.basename(path)} ({size} bytes)"
+                )
             )
         except Exception as e:
             return ToolResult(content=TextContent(text=f"Error sending file: {e}"))
@@ -301,10 +310,14 @@ class SendUserMessageTool(Tool):
         channel = self.state.active_channel
         channel_id = self.state.active_channel_id
         if channel is None or channel_id is None:
-            return ToolResult(content=TextContent(text="Error: No active Discord channel"))
+            return ToolResult(
+                content=TextContent(text="Error: No active Discord channel")
+            )
 
         if not input.message.strip():
-            return ToolResult(content=TextContent(text="Error: message cannot be empty"))
+            return ToolResult(
+                content=TextContent(text="Error: message cannot be empty")
+            )
 
         sent_chunks = 0
         for chunk in chunk_message(input.message):
@@ -321,7 +334,9 @@ class SendUserMessageTool(Tool):
             "assistant_message_sent",
             {"chunks": sent_chunks, "message_preview": input.message[:300]},
         )
-        return ToolResult(content=TextContent(text=f"Sent {sent_chunks} chunk(s) to user."))
+        return ToolResult(
+            content=TextContent(text=f"Sent {sent_chunks} chunk(s) to user.")
+        )
 
 
 @dataclass
@@ -340,7 +355,9 @@ class PeekQueuedUserMessagesTool(Tool):
     ) -> ToolResult:
         channel_id = self.state.active_channel_id
         if channel_id is None:
-            return ToolResult(content=TextContent(text="Error: No active Discord channel"))
+            return ToolResult(
+                content=TextContent(text="Error: No active Discord channel")
+            )
 
         queue = self.state.get_channel_queue(channel_id)
         items = self.state.peek_user_messages(channel_id, input.limit)
@@ -367,7 +384,9 @@ class DequeueUserMessagesTool(Tool):
     ) -> ToolResult:
         channel_id = self.state.active_channel_id
         if channel_id is None:
-            return ToolResult(content=TextContent(text="Error: No active Discord channel"))
+            return ToolResult(
+                content=TextContent(text="Error: No active Discord channel")
+            )
 
         items = self.state.dequeue_user_messages(channel_id, input.count)
         if self.state.active_run_stats is not None:
@@ -402,7 +421,9 @@ class CreateThreadTool(Tool):
     ) -> ToolResult:
         channel = self.state.active_channel
         if channel is None:
-            return ToolResult(content=TextContent(text="Error: No active Discord channel"))
+            return ToolResult(
+                content=TextContent(text="Error: No active Discord channel")
+            )
 
         if not isinstance(channel, (discord.TextChannel, discord.Thread)):
             return ToolResult(
@@ -497,9 +518,7 @@ class DiscordAPITool(Tool):
             return await self._request(input, token)
 
         return ToolResult(
-            content=TextContent(
-                text="Error: action must be `discover` or `request`."
-            )
+            content=TextContent(text="Error: action must be `discover` or `request`.")
         )
 
     async def _discover(self, token: str) -> ToolResult:
@@ -567,7 +586,10 @@ class DiscordAPITool(Tool):
                 {"method": "POST", "path": "/channels/{channel_id}/threads"},
                 {"method": "PATCH", "path": "/channels/{channel_id}"},
                 {"method": "GET", "path": "/guilds/{guild_id}/members/{user_id}"},
-                {"method": "PUT", "path": "/guilds/{guild_id}/members/{user_id}/roles/{role_id}"},
+                {
+                    "method": "PUT",
+                    "path": "/guilds/{guild_id}/members/{user_id}/roles/{role_id}",
+                },
             ],
             "request_mode_usage": {
                 "action": "request",
@@ -600,9 +622,7 @@ class DiscordAPITool(Tool):
             )
 
         try:
-            query_obj = (
-                json.loads(input.query_json) if input.query_json.strip() else {}
-            )
+            query_obj = json.loads(input.query_json) if input.query_json.strip() else {}
         except json.JSONDecodeError as e:
             return ToolResult(
                 content=TextContent(text=f"Error: query_json is invalid JSON: {e}")
@@ -611,7 +631,9 @@ class DiscordAPITool(Tool):
             query_obj = {}
         if not isinstance(query_obj, dict):
             return ToolResult(
-                content=TextContent(text="Error: query_json must decode to a JSON object.")
+                content=TextContent(
+                    text="Error: query_json must decode to a JSON object."
+                )
             )
 
         try:
@@ -688,11 +710,14 @@ class ClearContextTool(Tool):
 
     async def __call__(
         self,
+        input: None = None,
         execution_context: ExecutionContext | None = None,
     ) -> ToolResult:
         channel = self.state.active_channel
         if channel is None:
-            return ToolResult(content=TextContent(text="Error: No active Discord channel"))
+            return ToolResult(
+                content=TextContent(text="Error: No active Discord channel")
+            )
         self.state.clear_context_requested.add(channel.id)
         return ToolResult(
             content=TextContent(
