@@ -17,6 +17,7 @@ wheels/
 
 # Trace files
 traces/
+logs/
 
 # Generated files
 dag.html

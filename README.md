@@ -169,6 +169,40 @@ nano-cli --debug
 
 Note: Ctrl+J and Shift+Enter are not supported.
 
+## Discord Bot
+
+**nano-discord-bot** is an AI assistant that runs 24/7 as a Discord bot. It uses the same nano-agent core and tools to provide an agentic coding assistant directly in Discord channels and threads.
+
+### Features
+
+- **Queue-based messaging**: User messages are queued and processed asynchronously, so the bot handles concurrent messages gracefully
+- **Channel workers**: Each channel gets a dedicated worker that processes messages in order
+- **Discord tools**: Send messages, send files, create threads, explore guild/channel structure, and call the Discord REST API
+- **Session persistence**: Message queues are persisted to disk and recovered on restart
+- **All built-in tools**: Bash, Read, Write, Edit, Glob, Grep, Stat, Python, WebFetch, and more
+
+### Setup
+
+```bash
+# Set your Discord bot token
+export DISCORD_BOT_TOKEN=your-token-here
+
+# Run the bot
+uv run nano-discord-bot
+```
+
+### Slash Commands
+
+| Command | Description |
+|---------|-------------|
+| `/clear` | Clear conversation history in the current channel/thread |
+| `/queue` | Show queued user messages |
+| `/cd <path>` | Change working directory |
+| `/cwd` | Show current working directory |
+| `/thread <topic>` | Start a new conversation in a Discord thread |
+| `/renew` | Refresh Claude Code OAuth token |
+| `/explore` | Explore visible Discord context (guild/channels/threads) |
+
 ## Sub-Agents
 
 Create tools that spawn their own agents using `SubAgentTool`:

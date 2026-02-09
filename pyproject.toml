@@ -42,13 +42,14 @@ nano-cli = "cli:main"
 nano-agent-viewer = "scripts.viewer:main"
 nano-agent-console-viewer = "scripts.console_viewer:main"
 nano-agent-capture-auth = "nano_agent.providers.capture_claude_code_auth:main"
+nano-discord-bot = "bot.discord_bot:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["nano_agent", "cli", "scripts"]
+packages = ["nano_agent", "cli", "scripts", "bot"]
 
 [tool.uv]
 # Install the package in editable mode by default for development

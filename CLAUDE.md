@@ -122,6 +122,33 @@ Note: Ctrl+J and Shift+Enter are not supported.
 - Built-in tools: Bash, Read, Write, Edit, Glob, Grep, Stat, TodoWrite, WebFetch, Python
 - Edit tool prompts for user confirmation before applying changes
 
+## Discord Bot
+
+AI assistant running as a Discord bot, located in `bot/`.
+
+### Architecture
+
+- **`bot/discord_bot.py`** - Discord frontend: event handlers, slash commands, bot startup
+- **`bot/bot_agent.py`** - Agent loop and channel worker (processes queued messages per channel)
+- **`bot/bot_state.py`** - State management, queue operations, session persistence, pure helpers
+- **`bot/bot_tools.py`** - Discord-specific tools (SendUserMessage, SendFile, CreateThread, ExploreDiscord, DiscordAPI, etc.)
+- **`bot/test_bot.py`** - Tests (tiered: pure functions, state, tools, agent loop)
+
+### Running
+
+```bash
+# Set DISCORD_BOT_TOKEN in .env or environment
+uv run nano-discord-bot
+```
+
+### Design
+
+- Messages are queued per channel; the agent decides when to consume them via Peek/Dequeue tools
+- Assistant text is internal-only; the agent must call `SendUserMessage` to send text to Discord
+- One channel worker runs at a time per channel (via `ensure_channel_worker`)
+- Queue state is persisted to `logs/discord_agent_state/` and recovered on restart
+- Slash commands: `/clear`, `/queue`, `/cd`, `/cwd`, `/thread`, `/renew`, `/explore`
+
 ## Key Patterns
 
 ```python
