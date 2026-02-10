@@ -455,6 +455,81 @@ class TestPeekQueuedUserMessagesTool:
 # ---------------------------------------------------------------------------
 
 
+class TestSessionPersistence:
+    def _make_state(self, tmp_path: Path) -> BotState:
+        return BotState(state_root=tmp_path / "state")
+
+    def test_set_session_creates_file(self, tmp_path: Path):
+        s = self._make_state(tmp_path)
+        dag = DAG().system("test").user("hello").assistant("world")
+        s.set_session(1, dag)
+        assert s._session_file(1).exists()
+
+    def test_get_session_loads_from_disk(self, tmp_path: Path):
+        s = self._make_state(tmp_path)
+        dag = DAG().system("test").user("hello").assistant("world")
+        s.set_session(1, dag)
+
+        # New state instance, same directory — no in-memory session
+        s2 = BotState(state_root=tmp_path / "state")
+        assert 1 not in s2.sessions
+        loaded = s2.get_session(1, tools=[])
+        assert isinstance(loaded, DAG)
+        # Should have real content (not a fresh session)
+        messages = loaded.to_messages()
+        assert len(messages) >= 2  # user + assistant at minimum
+
+    def test_tool_reattachment_after_load(self, tmp_path: Path):
+        from nano_agent import ReadTool
+
+        s = self._make_state(tmp_path)
+        dag = DAG().system("test").tools(ReadTool()).user("hi").assistant("ok")
+        s.set_session(1, dag)
+
+        s2 = BotState(state_root=tmp_path / "state")
+        loaded = s2.get_session(1, tools=[ReadTool()])
+        assert loaded._tools is not None
+        assert len(loaded._tools) > 0
+        assert loaded._tools[0].name == "Read"
+
+    def test_corrupt_file_returns_fresh_session(self, tmp_path: Path):
+        s = self._make_state(tmp_path)
+        # Create a corrupt session file
+        s._ensure_state_dir(1)
+        s._session_file(1).write_text("NOT VALID JSON {{{", encoding="utf-8")
+
+        loaded = s.get_session(1, tools=[])
+        assert isinstance(loaded, DAG)
+        # Should be a fresh session (create_session fallback)
+        assert 1 in s.sessions
+
+    def test_delete_session_file(self, tmp_path: Path):
+        s = self._make_state(tmp_path)
+        dag = DAG().system("test").user("hi")
+        s.set_session(1, dag)
+        assert s._session_file(1).exists()
+
+        s.delete_session_file(1)
+        assert not s._session_file(1).exists()
+
+    def test_delete_session_file_noop_when_missing(self, tmp_path: Path):
+        s = self._make_state(tmp_path)
+        # Should not raise
+        s.delete_session_file(999)
+
+    def test_delete_all_session_files(self, tmp_path: Path):
+        s = self._make_state(tmp_path)
+        dag = DAG().system("test").user("hi")
+        s.set_session(10, dag)
+        s.set_session(20, dag)
+        assert s._session_file(10).exists()
+        assert s._session_file(20).exists()
+
+        s.delete_all_session_files()
+        assert not s._session_file(10).exists()
+        assert not s._session_file(20).exists()
+
+
 class TestAgentLoop:
     @pytest.mark.asyncio
     async def test_single_turn_no_tools(self, tmp_path: Path):

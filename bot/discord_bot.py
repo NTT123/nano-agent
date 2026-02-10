@@ -140,7 +140,7 @@ async def on_app_command_error(
 )
 async def clear_command(interaction: discord.Interaction) -> None:
     cwd = state.working_dirs.get(interaction.user.id)
-    state.sessions[interaction.channel_id] = _create_session(cwd)
+    state.set_session(interaction.channel_id, _create_session(cwd))
     state.clear_user_queue(interaction.channel_id)
     await interaction.response.send_message("Conversation cleared.")
 
@@ -195,7 +195,7 @@ async def cd_command(interaction: discord.Interaction, path: str) -> None:
         await interaction.response.send_message(f"Not a directory: `{resolved}`")
         return
     state.working_dirs[interaction.user.id] = resolved
-    state.sessions[interaction.channel_id] = _create_session(resolved)
+    state.set_session(interaction.channel_id, _create_session(resolved))
     await interaction.response.send_message(
         f"Working directory: `{resolved}` (conversation reset)"
     )
@@ -226,7 +226,7 @@ async def thread_command(
         type=discord.ChannelType.public_thread,
     )
     cwd = state.working_dirs.get(interaction.user.id)
-    state.sessions[thread.id] = _create_session(cwd)
+    state.set_session(thread.id, _create_session(cwd))
     await interaction.response.send_message(f"Thread created: {thread.mention}")
     await thread.send(
         f"New conversation started: **{topic}**\nSend messages here to chat."
@@ -242,6 +242,7 @@ async def renew_command(interaction: discord.Interaction) -> None:
         await async_get_config(timeout=30)
         global api
         api = ClaudeCodeAPI()
+        state.delete_all_session_files()
         state.sessions.clear()
         await interaction.followup.send("OAuth token refreshed successfully.")
     except Exception as e:

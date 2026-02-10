@@ -119,6 +119,9 @@ class BotState:
     def _internal_log_file(self, channel_id: int) -> Path:
         return self._channel_state_dir(channel_id) / "internal_events.jsonl"
 
+    def _session_file(self, channel_id: int) -> Path:
+        return self._channel_state_dir(channel_id) / "session.json"
+
     def _ensure_state_dir(self, channel_id: int) -> None:
         self._channel_state_dir(channel_id).mkdir(parents=True, exist_ok=True)
 
@@ -131,14 +134,20 @@ class BotState:
         system_prompt: str = "",
         tools: list[Any] | None = None,
     ) -> DAG:
-        if channel_id not in self.sessions:
-            self.sessions[channel_id] = self.create_session(
-                cwd, system_prompt=system_prompt, tools=tools
-            )
+        if channel_id in self.sessions:
+            return self.sessions[channel_id]
+        loaded = self._load_session(channel_id, tools=tools)
+        if loaded is not None:
+            self.sessions[channel_id] = loaded
+            return loaded
+        self.sessions[channel_id] = self.create_session(
+            cwd, system_prompt=system_prompt, tools=tools
+        )
         return self.sessions[channel_id]
 
     def set_session(self, channel_id: int, dag: DAG) -> None:
         self.sessions[channel_id] = dag
+        self._save_session(channel_id, dag)
 
     def create_session(
         self,
@@ -312,7 +321,44 @@ class BotState:
         )
         return rebuilt
 
-    # -- persistence --
+    # -- session persistence --
+
+    def _save_session(self, channel_id: int, dag: DAG) -> None:
+        try:
+            self._ensure_state_dir(channel_id)
+            dag.save(self._session_file(channel_id), session_id=f"channel_{channel_id}")
+        except Exception:
+            pass  # In-memory state is source of truth
+
+    def _load_session(
+        self, channel_id: int, tools: list[Any] | None = None
+    ) -> DAG | None:
+        path = self._session_file(channel_id)
+        if not path.exists():
+            return None
+        try:
+            loaded_dag, _meta = DAG.load(path)
+            if not loaded_dag._heads:
+                return None
+            if tools:
+                loaded_dag = loaded_dag._with_heads(loaded_dag._heads, tools=tools)
+            return loaded_dag
+        except Exception:
+            return None
+
+    def delete_session_file(self, channel_id: int) -> None:
+        try:
+            path = self._session_file(channel_id)
+            if path.exists():
+                path.unlink()
+        except Exception:
+            pass
+
+    def delete_all_session_files(self) -> None:
+        for channel_id in self.persisted_channel_ids():
+            self.delete_session_file(channel_id)
+
+    # -- queue persistence --
 
     def _save_channel_queue(self, channel_id: int) -> None:
         self._ensure_state_dir(channel_id)

@@ -358,8 +358,11 @@ async def channel_worker(
 
         if channel_id in state.clear_context_requested:
             state.clear_context_requested.discard(channel_id)
-            state.sessions[channel_id] = state.create_session(
-                cwd, system_prompt=system_prompt, tools=get_tools(state)
+            state.set_session(
+                channel_id,
+                state.create_session(
+                    cwd, system_prompt=system_prompt, tools=get_tools(state)
+                ),
             )
             state.clear_user_queue(channel_id)
             return
