@@ -141,12 +141,15 @@ class GeminiAPI(APIClientMixin):
                     if block.thought_signature:
                         fc_part["thought_signature"] = block.thought_signature
                     parts.append(fc_part)
-                    # Track tool name for later function_response
                     tool_name_map[block.id] = block.name
                 elif isinstance(block, ToolResultContent):
-                    # Tool result - Gemini requires the function name (snake_case)
+                    # Tool result - Gemini requires the function name (snake_case).
+                    # Images from tool results aren't yet forwarded to Gemini
+                    # (needs inlineData parts); text parts are concatenated.
                     tool_name = tool_name_map.get(block.tool_use_id, block.tool_use_id)
-                    result_text = "".join(tb.text for tb in block.content)
+                    result_text = "".join(
+                        tb.text for tb in block.content if isinstance(tb, TextContent)
+                    )
                     parts.append(
                         {
                             "function_response": {

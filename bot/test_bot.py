@@ -59,6 +59,20 @@ class MockMessage:
     webhook_id: int | None = None
 
 
+def _enqueue(
+    state: BotState, channel_id: int | str, msg: MockMessage, content: str
+) -> dict[str, Any]:
+    """Test helper: enqueue a MockMessage via the keyword-arg API."""
+    return state.enqueue_user_message(
+        str(channel_id),
+        message_id=str(msg.id),
+        author_id=str(msg.author.id),
+        author=str(msg.author),
+        content=content,
+        attachments=[a.url for a in msg.attachments],
+    )
+
+
 class MockChannel:
     """Captures messages sent through channel.send()."""
 
@@ -221,85 +235,85 @@ class TestBotStateQueue:
     def test_enqueue_and_peek(self, tmp_path: Path):
         s = self._make_state(tmp_path)
         msg = MockMessage(content="hi")
-        s.enqueue_user_message(1, msg, "hi")  # type: ignore[arg-type]
-        items = s.peek_user_messages(1)
+        _enqueue(s, "1", msg, "hi")
+        items = s.peek_user_messages("1")
         assert len(items) == 1
         assert items[0]["content"] == "hi"
 
     def test_dequeue(self, tmp_path: Path):
         s = self._make_state(tmp_path)
         msg = MockMessage(content="one")
-        s.enqueue_user_message(1, msg, "one")  # type: ignore[arg-type]
-        s.enqueue_user_message(1, MockMessage(content="two"), "two")  # type: ignore[arg-type]
-        items = s.dequeue_user_messages(1, count=1)
+        _enqueue(s, "1", msg, "one")
+        _enqueue(s, "1", MockMessage(content="two"), "two")
+        items = s.dequeue_user_messages("1", count=1)
         assert len(items) == 1
         assert items[0]["content"] == "one"
-        assert len(s.get_channel_queue(1)) == 1
+        assert len(s.get_channel_queue("1")) == 1
 
     def test_dequeue_multiple(self, tmp_path: Path):
         s = self._make_state(tmp_path)
         for i in range(5):
-            s.enqueue_user_message(1, MockMessage(content=f"m{i}"), f"m{i}")  # type: ignore[arg-type]
-        items = s.dequeue_user_messages(1, count=3)
+            _enqueue(s, "1", MockMessage(content=f"m{i}"), f"m{i}")
+        items = s.dequeue_user_messages("1", count=3)
         assert len(items) == 3
-        assert len(s.get_channel_queue(1)) == 2
+        assert len(s.get_channel_queue("1")) == 2
 
     def test_clear_queue(self, tmp_path: Path):
         s = self._make_state(tmp_path)
-        s.enqueue_user_message(1, MockMessage(), "x")  # type: ignore[arg-type]
-        s.clear_user_queue(1)
-        assert len(s.get_channel_queue(1)) == 0
+        _enqueue(s, "1", MockMessage(), "x")
+        s.clear_user_queue("1")
+        assert len(s.get_channel_queue("1")) == 0
 
     def test_queue_ids_monotonic(self, tmp_path: Path):
         s = self._make_state(tmp_path)
         ids = []
         for i in range(3):
-            q = s.enqueue_user_message(1, MockMessage(content=f"m{i}"), f"m{i}")  # type: ignore[arg-type]
+            q = _enqueue(s, "1", MockMessage(content=f"m{i}"), f"m{i}")
             ids.append(q["queue_id"])
         assert ids == sorted(ids)
         assert len(set(ids)) == 3
 
     def test_peek_empty(self, tmp_path: Path):
         s = self._make_state(tmp_path)
-        assert s.peek_user_messages(999) == []
+        assert s.peek_user_messages("999") == []
 
     def test_dequeue_empty(self, tmp_path: Path):
         s = self._make_state(tmp_path)
-        assert s.dequeue_user_messages(999) == []
+        assert s.dequeue_user_messages("999") == []
 
 
 class TestBotStateSession:
     def test_get_creates_session(self, tmp_path: Path):
         s = BotState(state_root=tmp_path / "state")
-        dag = s.get_session(1, tools=[])
+        dag = s.get_session("1", tools=[])
         assert isinstance(dag, DAG)
         # Second call returns same instance
-        assert s.get_session(1) is dag
+        assert s.get_session("1") is dag
 
     def test_set_session(self, tmp_path: Path):
         s = BotState(state_root=tmp_path / "state")
         dag = DAG().system("test")
-        s.set_session(1, dag)
-        assert s.sessions[1] is dag
+        s.set_session("1", dag)
+        assert s.sessions["1"] is dag
 
 
 class TestBotStateQueuePersistence:
     def test_save_and_reload(self, tmp_path: Path):
         s = BotState(state_root=tmp_path / "state")
-        s.enqueue_user_message(1, MockMessage(content="persisted"), "persisted")  # type: ignore[arg-type]
+        _enqueue(s, "1", MockMessage(content="persisted"), "persisted")
 
         # Create a new state pointing at same directory
         s2 = BotState(state_root=tmp_path / "state")
-        queue = s2.get_channel_queue(1)
+        queue = s2.get_channel_queue("1")
         assert len(queue) == 1
         assert queue[0]["content"] == "persisted"
 
     def test_persisted_channel_ids(self, tmp_path: Path):
         s = BotState(state_root=tmp_path / "state")
-        s.enqueue_user_message(10, MockMessage(), "a")  # type: ignore[arg-type]
-        s.enqueue_user_message(20, MockMessage(), "b")  # type: ignore[arg-type]
+        _enqueue(s, "10", MockMessage(), "a")
+        _enqueue(s, "20", MockMessage(), "b")
         ids = s.persisted_channel_ids()
-        assert set(ids) == {10, 20}
+        assert set(ids) == {"10", "20"}
 
     def test_no_state_dir(self, tmp_path: Path):
         s = BotState(state_root=tmp_path / "nonexistent")
@@ -310,13 +324,13 @@ class TestBotStateSanitizeDag:
     def test_no_change_needed(self, tmp_path: Path):
         s = BotState(state_root=tmp_path / "state")
         dag = DAG().system("test").user("hello").assistant("world")
-        result = s.sanitize_dag_for_api(dag, 1)
+        result = s.sanitize_dag_for_api(dag, "1")
         assert result is dag  # Same object, nothing removed
 
     def test_removes_empty_assistant(self, tmp_path: Path):
         s = BotState(state_root=tmp_path / "state")
         dag = DAG().system("test").user("hello").assistant("").user("again")
-        result = s.sanitize_dag_for_api(dag, 1)
+        result = s.sanitize_dag_for_api(dag, "1")
         messages = result.to_messages()
         for msg in messages:
             if msg.role == Role.ASSISTANT:
@@ -326,13 +340,13 @@ class TestBotStateSanitizeDag:
 class TestBotStateBuildQueueRuntimeNote:
     def test_empty_queue(self, tmp_path: Path):
         s = BotState(state_root=tmp_path / "state")
-        note = s.build_queue_runtime_note(1)
+        note = s.build_queue_runtime_note("1")
         assert "no queued user messages" in note
 
     def test_with_messages(self, tmp_path: Path):
         s = BotState(state_root=tmp_path / "state")
-        s.enqueue_user_message(1, MockMessage(content="hi"), "hi")  # type: ignore[arg-type]
-        note = s.build_queue_runtime_note(1)
+        _enqueue(s, "1", MockMessage(content="hi"), "hi")
+        note = s.build_queue_runtime_note("1")
         assert "Pending count: 1" in note
         assert "hi" in note
 
@@ -348,7 +362,7 @@ class TestSendUserMessageTool:
         from .bot_tools import SendUserMessageInput, SendUserMessageTool
 
         channel = MockChannel()
-        s = BotState(active_channel=channel, active_channel_id=42)  # type: ignore[arg-type]
+        s = BotState(active_channel=channel, active_channel_id="42")  # type: ignore[arg-type]
         s.active_run_stats = {"outbound_messages": 0}
         tool = SendUserMessageTool(state=s)
         result = await tool(SendUserMessageInput(message="hello"))
@@ -360,7 +374,7 @@ class TestSendUserMessageTool:
     async def test_empty_message_error(self):
         from .bot_tools import SendUserMessageInput, SendUserMessageTool
 
-        s = BotState(active_channel=MockChannel(), active_channel_id=42)  # type: ignore[arg-type]
+        s = BotState(active_channel=MockChannel(), active_channel_id="42")  # type: ignore[arg-type]
         tool = SendUserMessageTool(state=s)
         result = await tool(SendUserMessageInput(message="   "))
         assert "Error" in result.content.text
@@ -412,10 +426,10 @@ class TestClearContextTool:
         from .bot_tools import ClearContextTool
 
         channel = MockChannel(channel_id=7)
-        s = BotState(active_channel=channel)  # type: ignore[arg-type]
+        s = BotState(active_channel=channel, active_channel_id="7")
         tool = ClearContextTool(state=s)
         result = await tool()
-        assert 7 in s.clear_context_requested
+        assert "7" in s.clear_context_requested
         assert "cleared" in result.content.text.lower()
 
 
@@ -424,9 +438,9 @@ class TestDequeueUserMessagesTool:
     async def test_dequeue(self, tmp_path: Path):
         from .bot_tools import DequeueUserMessagesInput, DequeueUserMessagesTool
 
-        s = BotState(active_channel_id=1, state_root=tmp_path / "state")
+        s = BotState(active_channel_id="1", state_root=tmp_path / "state")
         s.active_run_stats = {"dequeued_messages": 0}
-        s.enqueue_user_message(1, MockMessage(content="hi"), "hi")  # type: ignore[arg-type]
+        _enqueue(s, "1", MockMessage(content="hi"), "hi")
         tool = DequeueUserMessagesTool(state=s)
         result = await tool(DequeueUserMessagesInput(count=1))
         payload = json.loads(result.content.text)
@@ -439,15 +453,15 @@ class TestPeekQueuedUserMessagesTool:
     async def test_peek(self, tmp_path: Path):
         from .bot_tools import PeekQueuedUserMessagesInput, PeekQueuedUserMessagesTool
 
-        s = BotState(active_channel_id=1, state_root=tmp_path / "state")
-        s.enqueue_user_message(1, MockMessage(content="hi"), "hi")  # type: ignore[arg-type]
+        s = BotState(active_channel_id="1", state_root=tmp_path / "state")
+        _enqueue(s, "1", MockMessage(content="hi"), "hi")
         tool = PeekQueuedUserMessagesTool(state=s)
         result = await tool(PeekQueuedUserMessagesInput(limit=5))
         payload = json.loads(result.content.text)
         assert payload["pending_count"] == 1
         assert len(payload["messages"]) == 1
         # Queue should still have the message
-        assert len(s.get_channel_queue(1)) == 1
+        assert len(s.get_channel_queue("1")) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -462,18 +476,18 @@ class TestSessionPersistence:
     def test_set_session_creates_file(self, tmp_path: Path):
         s = self._make_state(tmp_path)
         dag = DAG().system("test").user("hello").assistant("world")
-        s.set_session(1, dag)
-        assert s._session_file(1).exists()
+        s.set_session("1", dag)
+        assert s._session_file("1").exists()
 
     def test_get_session_loads_from_disk(self, tmp_path: Path):
         s = self._make_state(tmp_path)
         dag = DAG().system("test").user("hello").assistant("world")
-        s.set_session(1, dag)
+        s.set_session("1", dag)
 
         # New state instance, same directory — no in-memory session
         s2 = BotState(state_root=tmp_path / "state")
-        assert 1 not in s2.sessions
-        loaded = s2.get_session(1, tools=[])
+        assert "1" not in s2.sessions
+        loaded = s2.get_session("1", tools=[])
         assert isinstance(loaded, DAG)
         # Should have real content (not a fresh session)
         messages = loaded.to_messages()
@@ -484,10 +498,10 @@ class TestSessionPersistence:
 
         s = self._make_state(tmp_path)
         dag = DAG().system("test").tools(ReadTool()).user("hi").assistant("ok")
-        s.set_session(1, dag)
+        s.set_session("1", dag)
 
         s2 = BotState(state_root=tmp_path / "state")
-        loaded = s2.get_session(1, tools=[ReadTool()])
+        loaded = s2.get_session("1", tools=[ReadTool()])
         assert loaded._tools is not None
         assert len(loaded._tools) > 0
         assert loaded._tools[0].name == "Read"
@@ -495,39 +509,39 @@ class TestSessionPersistence:
     def test_corrupt_file_returns_fresh_session(self, tmp_path: Path):
         s = self._make_state(tmp_path)
         # Create a corrupt session file
-        s._ensure_state_dir(1)
-        s._session_file(1).write_text("NOT VALID JSON {{{", encoding="utf-8")
+        s._ensure_state_dir("1")
+        s._session_file("1").write_text("NOT VALID JSON {{{", encoding="utf-8")
 
-        loaded = s.get_session(1, tools=[])
+        loaded = s.get_session("1", tools=[])
         assert isinstance(loaded, DAG)
         # Should be a fresh session (create_session fallback)
-        assert 1 in s.sessions
+        assert "1" in s.sessions
 
     def test_delete_session_file(self, tmp_path: Path):
         s = self._make_state(tmp_path)
         dag = DAG().system("test").user("hi")
-        s.set_session(1, dag)
-        assert s._session_file(1).exists()
+        s.set_session("1", dag)
+        assert s._session_file("1").exists()
 
-        s.delete_session_file(1)
-        assert not s._session_file(1).exists()
+        s.delete_session_file("1")
+        assert not s._session_file("1").exists()
 
     def test_delete_session_file_noop_when_missing(self, tmp_path: Path):
         s = self._make_state(tmp_path)
         # Should not raise
-        s.delete_session_file(999)
+        s.delete_session_file("999")
 
     def test_delete_all_session_files(self, tmp_path: Path):
         s = self._make_state(tmp_path)
         dag = DAG().system("test").user("hi")
-        s.set_session(10, dag)
-        s.set_session(20, dag)
-        assert s._session_file(10).exists()
-        assert s._session_file(20).exists()
+        s.set_session("10", dag)
+        s.set_session("20", dag)
+        assert s._session_file("10").exists()
+        assert s._session_file("20").exists()
 
         s.delete_all_session_files()
-        assert not s._session_file(10).exists()
-        assert not s._session_file(20).exists()
+        assert not s._session_file("10").exists()
+        assert not s._session_file("20").exists()
 
 
 class TestAgentLoop:
@@ -538,7 +552,7 @@ class TestAgentLoop:
         channel = MockChannel()
         s = BotState(
             active_channel=channel,  # type: ignore[arg-type]
-            active_channel_id=42,
+            active_channel_id="42",
             state_root=tmp_path / "state",
         )
         dag = DAG().system("test").user("hello")

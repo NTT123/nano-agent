@@ -42,10 +42,12 @@ from nano_agent import (
     CodexAPI,
     FireworksAPI,
     GeminiAPI,
+    ImageContent,
     Response,
     TextContent,
     ToolResultContent,
     ToolUseContent,
+    render_content_text,
 )
 from nano_agent.cancellation import (
     CancellationChoice,
@@ -909,8 +911,10 @@ class TerminalApp:
         try:
             tool_result = await self.cancel_token.run(tool.execute(tool_call.input))
             content = tool_result.content
-            result_list = content if isinstance(content, list) else [content]
-            result_text = "\n".join(r.text for r in result_list)
+            result_list: list[TextContent | ImageContent] = (
+                list(content) if isinstance(content, list) else [content]
+            )
+            result_text = "\n".join(render_content_text(r) for r in result_list)
             self.add_message(create_tool_result_message(result_text))
             self.dag = self.dag.tool_result(
                 ToolResultContent(tool_use_id=tool_call.id, content=result_list)

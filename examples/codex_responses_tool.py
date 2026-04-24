@@ -17,7 +17,12 @@ from typing import Any
 
 import httpx
 
-from nano_agent import BashTool, OpenAIAPI, get_codex_access_token
+from nano_agent import (
+    BashTool,
+    OpenAIAPI,
+    get_codex_access_token,
+    render_content_text,
+)
 
 CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses"
 
@@ -174,9 +179,9 @@ async def main() -> None:
         tool_result = await tool.execute(args)
         content = tool_result.content
         if isinstance(content, list):
-            tool_output = "".join(tc.text for tc in content)
+            tool_output = "".join(render_content_text(tc) for tc in content)
         else:
-            tool_output = content.text
+            tool_output = render_content_text(content)
 
         # Build follow-up context: prior context + model output items + tool output
         followup_context = list(context)

@@ -14,9 +14,79 @@ from typing import Any, Protocol, Self
 import httpx
 
 from ..dag import DAG
-from ..data_structures import Response
+from ..data_structures import (
+    ImageContent,
+    Message,
+    Response,
+    Role,
+    TextContent,
+    ToolResultContent,
+)
 
-__all__ = ["APIError", "APIClientMixin", "APIProtocol"]
+__all__ = [
+    "APIError",
+    "APIClientMixin",
+    "APIProtocol",
+    "responses_tool_result_item",
+    "responses_user_image_item",
+]
+
+
+def responses_tool_result_item(block: ToolResultContent) -> dict[str, Any]:
+    """Serialize a ``ToolResultContent`` into an OpenAI Responses-API
+    ``function_call_output`` item.
+
+    ``output`` is emitted as an array of ``input_text`` / ``input_image``
+    items when the tool result contains any image; otherwise as a plain
+    string for compactness.
+    """
+    output_items: list[dict[str, Any]] = []
+    has_image = False
+    text_chunks: list[str] = []
+    for tb in block.content:
+        if isinstance(tb, ImageContent):
+            has_image = True
+            output_items.append(
+                {
+                    "type": "input_image",
+                    "detail": "auto",
+                    "image_url": f"data:{tb.media_type};base64,{tb.data}",
+                }
+            )
+        elif isinstance(tb, TextContent):
+            text_chunks.append(tb.text)
+            output_items.append({"type": "input_text", "text": tb.text})
+
+    if not has_image:
+        return {
+            "type": "function_call_output",
+            "call_id": block.tool_use_id,
+            "output": "".join(text_chunks),
+        }
+    return {
+        "type": "function_call_output",
+        "call_id": block.tool_use_id,
+        "output": output_items,
+    }
+
+
+def responses_user_image_item(msg: Message, image: ImageContent) -> dict[str, Any]:
+    """Build a user-role message item containing an ``input_image`` block.
+
+    Used when an ``ImageContent`` appears mid-message: the caller flushes
+    pending text first, then emits this item to carry the image. OpenAI
+    Responses only accepts ``input_image`` under a user role.
+    """
+    return {
+        "role": Role.USER.value if msg.role == Role.USER else msg.role.value,
+        "content": [
+            {
+                "type": "input_image",
+                "detail": "auto",
+                "image_url": f"data:{image.media_type};base64,{image.data}",
+            }
+        ],
+    }
 
 
 class APIError(Exception):

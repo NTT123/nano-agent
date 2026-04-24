@@ -1,19 +1,31 @@
-"""Bot state management, queue operations, session persistence, and pure helpers."""
+"""Bot state management, queue operations, session persistence, and pure helpers.
+
+Platform-agnostic: Discord and Slack frontends share the same state dataclass.
+Channel and user identifiers are normalized to ``str`` at the platform boundary
+(Discord snowflakes stringified, Slack IDs already strings).
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import os
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-import discord
-
-from nano_agent import DAG, Role, TextContent, ThinkingContent
+from nano_agent import (
+    DAG,
+    ImageContent,
+    Role,
+    TextContent,
+    ThinkingContent,
+    render_content_text,
+)
 from nano_agent.data_structures import Message, ToolUseContent
+from nano_agent.tools.base import Tool
 
 
 def utc_now_iso() -> str:
@@ -22,10 +34,7 @@ def utc_now_iso() -> str:
 
 
 def chunk_message(text: str, limit: int = 2000) -> list[str]:
-    """Split text into chunks respecting Discord's message limit.
-
-    Tries to split at line boundaries for readability.
-    """
+    """Split text into chunks with a hard max length, preferring line breaks."""
     if len(text) <= limit:
         return [text]
 
@@ -68,6 +77,14 @@ def serialize_content_blocks(content: list[Any]) -> list[dict[str, Any]]:
                     "input": block.input,
                 }
             )
+        elif isinstance(block, ImageContent):
+            blocks.append(
+                {
+                    "type": "image",
+                    "media_type": block.media_type,
+                    "bytes": len(block.data),
+                }
+            )
         else:
             blocks.append({"type": type(block).__name__, "raw": str(block)})
     return blocks
@@ -76,8 +93,8 @@ def serialize_content_blocks(content: list[Any]) -> list[dict[str, Any]]:
 def serialize_text_contents(content: list[Any]) -> list[str]:
     texts: list[str] = []
     for item in content:
-        if isinstance(item, TextContent):
-            texts.append(item.text)
+        if isinstance(item, (TextContent, ImageContent)):
+            texts.append(render_content_text(item))
         else:
             texts.append(str(item))
     return texts
@@ -92,44 +109,50 @@ def truncate(text: str, limit: int = 200) -> str:
 
 @dataclass
 class BotState:
-    bot: discord.Client | None = None
-    sessions: dict[int, DAG] = field(default_factory=dict)
-    working_dirs: dict[int, str] = field(default_factory=dict)
-    active_channel: discord.abc.Messageable | None = None
-    active_channel_id: int | None = None
-    clear_context_requested: set[int] = field(default_factory=set)
-    channel_message_queues: dict[int, list[dict[str, Any]]] = field(
+    # ``bot`` and ``active_channel`` are platform-specific opaque refs
+    # (discord.Client, slack_bolt AsyncApp; channel objects likewise).
+    bot: Any = None
+    sessions: dict[str, DAG] = field(default_factory=dict)
+    working_dirs: dict[str, str] = field(default_factory=dict)
+    active_channel: Any = None
+    active_channel_id: str | None = None
+    clear_context_requested: set[str] = field(default_factory=set)
+    channel_message_queues: dict[str, list[dict[str, Any]]] = field(
         default_factory=dict
     )
-    channel_queue_seq: dict[int, int] = field(default_factory=dict)
-    channel_last_user_id: dict[int, int] = field(default_factory=dict)
-    channel_worker_tasks: dict[int, asyncio.Task[None]] = field(default_factory=dict)
+    channel_queue_seq: dict[str, int] = field(default_factory=dict)
+    channel_last_user_id: dict[str, str] = field(default_factory=dict)
+    channel_worker_tasks: dict[str, asyncio.Task[None]] = field(default_factory=dict)
     active_run_stats: dict[str, int] | None = None
     agent_runtime_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     state_root: Path = Path("logs/discord_agent_state")
+    # Set by the frontend to the platform-appropriate tool factory. Used when
+    # reloading persisted sessions so Slack sessions don't come back with
+    # Discord tools attached (or vice versa).
+    tools_factory: Callable[[], list[Tool]] | None = None
 
     # -- path helpers --
 
-    def _channel_state_dir(self, channel_id: int) -> Path:
+    def _channel_state_dir(self, channel_id: str) -> Path:
         return self.state_root / f"channel_{channel_id}"
 
-    def _queue_file(self, channel_id: int) -> Path:
+    def _queue_file(self, channel_id: str) -> Path:
         return self._channel_state_dir(channel_id) / "queue.json"
 
-    def _internal_log_file(self, channel_id: int) -> Path:
+    def _internal_log_file(self, channel_id: str) -> Path:
         return self._channel_state_dir(channel_id) / "internal_events.jsonl"
 
-    def _session_file(self, channel_id: int) -> Path:
+    def _session_file(self, channel_id: str) -> Path:
         return self._channel_state_dir(channel_id) / "session.json"
 
-    def _ensure_state_dir(self, channel_id: int) -> None:
+    def _ensure_state_dir(self, channel_id: str) -> None:
         self._channel_state_dir(channel_id).mkdir(parents=True, exist_ok=True)
 
     # -- session management --
 
     def get_session(
         self,
-        channel_id: int,
+        channel_id: str,
         cwd: str | None = None,
         system_prompt: str = "",
         tools: list[Any] | None = None,
@@ -145,7 +168,7 @@ class BotState:
         )
         return self.sessions[channel_id]
 
-    def set_session(self, channel_id: int, dag: DAG) -> None:
+    def set_session(self, channel_id: str, dag: DAG) -> None:
         self.sessions[channel_id] = dag
         self._save_session(channel_id, dag)
 
@@ -169,32 +192,43 @@ class BotState:
 
     # -- queue operations --
 
-    def get_channel_queue(self, channel_id: int) -> list[dict[str, Any]]:
+    def get_channel_queue(self, channel_id: str) -> list[dict[str, Any]]:
         if channel_id not in self.channel_message_queues:
             self.channel_message_queues[channel_id] = self._load_channel_queue(
                 channel_id
             )
         return self.channel_message_queues[channel_id]
 
-    def _next_queue_id(self, channel_id: int) -> int:
+    def _next_queue_id(self, channel_id: str) -> int:
         self.channel_queue_seq[channel_id] = (
             self.channel_queue_seq.get(channel_id, 0) + 1
         )
         return self.channel_queue_seq[channel_id]
 
     def enqueue_user_message(
-        self, channel_id: int, message: discord.Message, content: str
+        self,
+        channel_id: str,
+        *,
+        message_id: str,
+        author_id: str,
+        author: str,
+        content: str,
+        attachments: list[str] | None = None,
     ) -> dict[str, Any]:
-        """Queue an inbound Discord user message for deferred consumption."""
+        """Queue an inbound user message for deferred consumption.
+
+        The caller (Discord / Slack frontend) is responsible for extracting
+        these fields from the native message object before enqueuing.
+        """
         queue = self.get_channel_queue(channel_id)
         queued: dict[str, Any] = {
             "queue_id": self._next_queue_id(channel_id),
-            "message_id": message.id,
-            "author_id": message.author.id,
-            "author": str(message.author),
+            "message_id": message_id,
+            "author_id": author_id,
+            "author": author,
             "content": content,
             "created_at": utc_now_iso(),
-            "attachments": [a.url for a in message.attachments],
+            "attachments": list(attachments or []),
         }
         queue.append(queued)
         self._save_channel_queue(channel_id)
@@ -202,13 +236,13 @@ class BotState:
         return queued
 
     def peek_user_messages(
-        self, channel_id: int, limit: int = 5
+        self, channel_id: str, limit: int = 5
     ) -> list[dict[str, Any]]:
         queue = self.get_channel_queue(channel_id)
         return [dict(item) for item in queue[: max(1, min(limit, 50))]]
 
     def dequeue_user_messages(
-        self, channel_id: int, count: int = 1
+        self, channel_id: str, count: int = 1
     ) -> list[dict[str, Any]]:
         queue = self.get_channel_queue(channel_id)
         take = max(1, min(count, 20))
@@ -225,7 +259,7 @@ class BotState:
             )
         return items
 
-    def clear_user_queue(self, channel_id: int) -> None:
+    def clear_user_queue(self, channel_id: str) -> None:
         self.channel_message_queues[channel_id] = []
         self._save_channel_queue(channel_id)
         self.append_internal_log(channel_id, "user_queue_cleared", {})
@@ -233,7 +267,7 @@ class BotState:
     # -- notifications --
 
     def _format_queue_preview(
-        self, channel_id: int, limit: int = 5, max_content_len: int = 140
+        self, channel_id: str, limit: int = 5, max_content_len: int = 140
     ) -> list[str]:
         """Shared preview rendering for queue notifications."""
         queue = self.get_channel_queue(channel_id)
@@ -247,7 +281,7 @@ class BotState:
             lines.append(f"- #{qid} from {author}: {content}")
         return lines
 
-    def build_queue_runtime_note(self, channel_id: int) -> str:
+    def build_queue_runtime_note(self, channel_id: str) -> str:
         """Build per-turn runtime note so agent can choose when to consume messages."""
         queue = self.get_channel_queue(channel_id)
         if not queue:
@@ -270,7 +304,7 @@ class BotState:
         )
 
     def format_queue_notification_for_dag(
-        self, channel_id: int, limit: int = 10
+        self, channel_id: str, limit: int = 10
     ) -> str:
         """Render queued-message notification as a synthetic user message."""
         queue = self.get_channel_queue(channel_id)
@@ -289,7 +323,7 @@ class BotState:
 
     # -- DAG sanitization --
 
-    def sanitize_dag_for_api(self, dag: DAG, channel_id: int) -> DAG:
+    def sanitize_dag_for_api(self, dag: DAG, channel_id: str) -> DAG:
         """Drop invalid empty assistant messages from history before API calls."""
         messages = dag.to_messages()
         filtered = [m for m in messages if not is_empty_assistant_message(m)]
@@ -323,7 +357,7 @@ class BotState:
 
     # -- session persistence --
 
-    def _save_session(self, channel_id: int, dag: DAG) -> None:
+    def _save_session(self, channel_id: str, dag: DAG) -> None:
         try:
             self._ensure_state_dir(channel_id)
             dag.save(self._session_file(channel_id), session_id=f"channel_{channel_id}")
@@ -331,7 +365,7 @@ class BotState:
             pass  # In-memory state is source of truth
 
     def _load_session(
-        self, channel_id: int, tools: list[Any] | None = None
+        self, channel_id: str, tools: list[Any] | None = None
     ) -> DAG | None:
         path = self._session_file(channel_id)
         if not path.exists():
@@ -346,7 +380,7 @@ class BotState:
         except Exception:
             return None
 
-    def delete_session_file(self, channel_id: int) -> None:
+    def delete_session_file(self, channel_id: str) -> None:
         try:
             path = self._session_file(channel_id)
             if path.exists():
@@ -360,13 +394,13 @@ class BotState:
 
     # -- queue persistence --
 
-    def _save_channel_queue(self, channel_id: int) -> None:
+    def _save_channel_queue(self, channel_id: str) -> None:
         self._ensure_state_dir(channel_id)
         queue = self.channel_message_queues.get(channel_id, [])
         with self._queue_file(channel_id).open("w", encoding="utf-8") as f:
             json.dump(queue, f, ensure_ascii=False, indent=2)
 
-    def _load_channel_queue(self, channel_id: int) -> list[dict[str, Any]]:
+    def _load_channel_queue(self, channel_id: str) -> list[dict[str, Any]]:
         qfile = self._queue_file(channel_id)
         if not qfile.exists():
             return []
@@ -387,11 +421,11 @@ class BotState:
         )
         return queue
 
-    def persisted_channel_ids(self) -> list[int]:
+    def persisted_channel_ids(self) -> list[str]:
         """Return channel IDs discovered from persisted queue directories."""
         if not self.state_root.exists():
             return []
-        ids: list[int] = []
+        ids: list[str] = []
         for entry in self.state_root.iterdir():
             if not entry.is_dir():
                 continue
@@ -399,14 +433,14 @@ class BotState:
             if not name.startswith("channel_"):
                 continue
             raw = name.removeprefix("channel_")
-            if raw.isdigit():
-                ids.append(int(raw))
+            if raw:
+                ids.append(raw)
         return ids
 
     # -- logging --
 
     def append_internal_log(
-        self, channel_id: int, event: str, payload: dict[str, Any]
+        self, channel_id: str, event: str, payload: dict[str, Any]
     ) -> None:
         """Append an internal event for this channel to persistent jsonl logs."""
         self._ensure_state_dir(channel_id)

@@ -1,4 +1,9 @@
-"""Discord-specific tool classes for the bot."""
+"""Discord-specific tool classes for the bot.
+
+Shared platform-agnostic tools (``PeekQueuedUserMessages``,
+``DequeueUserMessages``, ``ClearContext``) are also defined here and reused
+by the Slack bot via ``bot.slack_tools``.
+"""
 
 from __future__ import annotations
 
@@ -14,6 +19,7 @@ import httpx
 from nano_agent import ExecutionContext, TextContent, get_default_tools
 from nano_agent.tools.base import Desc, Tool, ToolResult
 
+from .bot_introspect import InspectBotStateTool
 from .bot_state import BotState, chunk_message
 
 # --- Helpers ---
@@ -55,7 +61,7 @@ def _summarize_channel(channel_obj: Any) -> dict[str, Any]:
 def build_discord_explore_payload(
     bot: discord.Client,
     *,
-    channel: discord.abc.Messageable | None = None,
+    channel: Any | None = None,
     include_channels: bool = True,
     include_threads: bool = True,
     channel_limit: int = 50,
@@ -355,9 +361,7 @@ class PeekQueuedUserMessagesTool(Tool):
     ) -> ToolResult:
         channel_id = self.state.active_channel_id
         if channel_id is None:
-            return ToolResult(
-                content=TextContent(text="Error: No active Discord channel")
-            )
+            return ToolResult(content=TextContent(text="Error: No active channel"))
 
         queue = self.state.get_channel_queue(channel_id)
         items = self.state.peek_user_messages(channel_id, input.limit)
@@ -384,9 +388,7 @@ class DequeueUserMessagesTool(Tool):
     ) -> ToolResult:
         channel_id = self.state.active_channel_id
         if channel_id is None:
-            return ToolResult(
-                content=TextContent(text="Error: No active Discord channel")
-            )
+            return ToolResult(content=TextContent(text="Error: No active channel"))
 
         items = self.state.dequeue_user_messages(channel_id, input.count)
         if self.state.active_run_stats is not None:
@@ -443,7 +445,7 @@ class CreateThreadTool(Tool):
                 name=input.topic,
                 type=discord.ChannelType.public_thread,
             )
-            self.state.sessions[thread.id] = self.state.create_session()
+            self.state.sessions[str(thread.id)] = self.state.create_session()
             initial = input.message or f"New conversation started: **{input.topic}**"
             await thread.send(initial)
             return ToolResult(
@@ -713,12 +715,10 @@ class ClearContextTool(Tool):
         input: None = None,
         execution_context: ExecutionContext | None = None,
     ) -> ToolResult:
-        channel = self.state.active_channel
-        if channel is None:
-            return ToolResult(
-                content=TextContent(text="Error: No active Discord channel")
-            )
-        self.state.clear_context_requested.add(channel.id)
+        channel_id = self.state.active_channel_id
+        if channel_id is None:
+            return ToolResult(content=TextContent(text="Error: No active channel"))
+        self.state.clear_context_requested.add(channel_id)
         return ToolResult(
             content=TextContent(
                 text="Context cleared. The next message will start a fresh conversation."
@@ -773,8 +773,8 @@ class RestartBotTool(Tool):
         return ToolResult(content=TextContent(text="Restarting..."))
 
 
-def get_tools(state: BotState) -> list[Tool]:
-    """Get tools suitable for Discord (excludes AskUserQuestion, adds Discord tools)."""
+def get_discord_tools(state: BotState) -> list[Tool]:
+    """Discord tool set: default tools + Discord-specific tools."""
     tools: list[Tool] = [t for t in get_default_tools() if t.name != "AskUserQuestion"]
     tools.append(SendUserMessageTool(state=state))
     tools.append(PeekQueuedUserMessagesTool(state=state))
@@ -785,4 +785,5 @@ def get_tools(state: BotState) -> list[Tool]:
     tools.append(DiscordAPITool(state=state))
     tools.append(ClearContextTool(state=state))
     tools.append(RestartBotTool(state=state))
+    tools.append(InspectBotStateTool(state=state))
     return tools

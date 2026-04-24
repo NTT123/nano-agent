@@ -23,7 +23,7 @@ from typing import (
     get_type_hints,
 )
 
-from ..data_structures import SubGraph, TextContent
+from ..data_structures import ImageContent, SubGraph, TextContent
 
 if TYPE_CHECKING:
     from ..execution_context import ExecutionContext
@@ -47,8 +47,8 @@ class ToolResult:
         sub_graph: Optional sub-agent execution graph (for SubAgentTool)
     """
 
-    content: "TextContent | list[TextContent]"
-    sub_graph: "SubGraph | None" = None
+    content: TextContent | ImageContent | list[TextContent | ImageContent]
+    sub_graph: SubGraph | None = None
 
 
 # =============================================================================
@@ -462,6 +462,17 @@ def _save_full_output(content: str, tool_name: str) -> str:
     return str(file_path)
 
 
+def _maybe_truncate(
+    content: TextContent | ImageContent,
+    tool_name: str,
+    config: TruncationConfig,
+) -> TextContent | ImageContent:
+    """Truncate TextContent; leave ImageContent unchanged."""
+    if isinstance(content, ImageContent):
+        return content
+    return _truncate_text_content(content, tool_name, config)
+
+
 def _truncate_text_content(
     content: TextContent, tool_name: str, config: TruncationConfig
 ) -> TextContent:
@@ -704,7 +715,9 @@ class Tool:
         Truncation can be configured per-tool via _truncation_config class variable.
         """
         # Call the tool
-        result: TextContent | list[TextContent] | ToolResult
+        result: (
+            TextContent | ImageContent | list[TextContent | ImageContent] | ToolResult
+        )
         if self._no_input:
             # No-input tool: call without arguments
             if isinstance(self, SubAgentTool):
@@ -727,17 +740,14 @@ class Tool:
         else:
             tool_result = ToolResult(content=result)
 
-        # Apply truncation if enabled
+        # Apply truncation if enabled (text only; images pass through unchanged).
         config = self._truncation_config or _DEFAULT_TRUNCATION_CONFIG
         if config.enabled:
             content = tool_result.content
             if isinstance(content, list):
-                content = [
-                    _truncate_text_content(tc, self.name, config) for tc in content
-                ]
+                content = [_maybe_truncate(tc, self.name, config) for tc in content]
             else:
-                content = _truncate_text_content(content, self.name, config)
-            # Create new ToolResult with truncated content (preserve sub_graph)
+                content = _maybe_truncate(content, self.name, config)
             tool_result = ToolResult(content=content, sub_graph=tool_result.sub_graph)
 
         return tool_result
@@ -746,7 +756,9 @@ class Tool:
         self,
         input: Any,
         execution_context: ExecutionContext | None = None,
-    ) -> TextContent | list[TextContent] | ToolResult:  # noqa: ARG002
+    ) -> (
+        TextContent | ImageContent | list[TextContent | ImageContent] | ToolResult
+    ):  # noqa: ARG002
         """Execute the tool with given input. Override in subclasses.
 
         For no-input tools, simply omit the input parameter in your override.

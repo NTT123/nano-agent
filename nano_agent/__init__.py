@@ -22,6 +22,8 @@ from .dag import DAG, Node
 from .data_structures import (  # Enums; Content blocks (sum type: ContentBlock); Messages; Node data (sum type: NodeData); Exhaustiveness helper; JSON type aliases; Serialization TypedDicts (for type-safe dict handling); Sub-agent support
     ContentBlock,
     ContentBlockDict,
+    ImageContent,
+    ImageContentDict,
     JSONObject,
     JSONSchema,
     JSONValue,
@@ -53,6 +55,7 @@ from .data_structures import (  # Enums; Content blocks (sum type: ContentBlock)
     Usage,
     UsageDict,
     assert_never,
+    render_content_text,
 )
 
 # Execution context and sub-agent support
@@ -170,6 +173,9 @@ __all__ = [
     "ThinkingContent",
     "ToolUseContent",
     "ToolResultContent",
+    "ImageContent",
+    "ImageContentDict",
+    "render_content_text",
     "NodeData",
     "SystemPrompt",
     "ToolDefinitions",

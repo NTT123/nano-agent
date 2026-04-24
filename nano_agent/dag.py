@@ -32,6 +32,7 @@ from typing import Any
 
 from .data_structures import (
     ContentBlock,
+    ImageContent,
     Message,
     NodeData,
     Response,
@@ -59,6 +60,17 @@ from .tools import Tool
 def _generate_id() -> str:
     """Generate a unique node ID."""
     return uuid.uuid4().hex[:12]
+
+
+# Content block classes accepted inside a user or assistant message. Extracted
+# so adding a new block type doesn't require editing four isinstance tuples.
+_MESSAGE_BLOCKS = (
+    TextContent,
+    ThinkingContent,
+    ToolUseContent,
+    ToolResultContent,
+    ImageContent,
+)
 
 
 # =============================================================================
@@ -530,23 +542,15 @@ class DAG:
                 raise ValueError(
                     "Cannot mix sequence with additional ContentBlock arguments"
                 )
-            blocks: list[ContentBlock] = []
-            for block in content:
-                if isinstance(
-                    block,
-                    (TextContent, ThinkingContent, ToolUseContent, ToolResultContent),
-                ):
-                    blocks.append(block)
+            blocks: list[ContentBlock] = [
+                block for block in content if isinstance(block, _MESSAGE_BLOCKS)
+            ]
             data = Message(Role.USER, blocks)
             if not self._heads:
                 return self._with_heads((Node.root(data),))
             return self.append_to(data, heads=self._heads)
         else:
-            # content is a single ContentBlock
-            if not isinstance(
-                content,
-                (TextContent, ThinkingContent, ToolUseContent, ToolResultContent),
-            ):
+            if not isinstance(content, _MESSAGE_BLOCKS):
                 raise TypeError("Invalid content type for user message")
             block = content
             all_content: list[ContentBlock] = [block, *more]
@@ -585,23 +589,15 @@ class DAG:
                 raise ValueError(
                     "Cannot mix sequence with additional ContentBlock arguments"
                 )
-            blocks: list[ContentBlock] = []
-            for block in content:
-                if isinstance(
-                    block,
-                    (TextContent, ThinkingContent, ToolUseContent, ToolResultContent),
-                ):
-                    blocks.append(block)
+            blocks: list[ContentBlock] = [
+                block for block in content if isinstance(block, _MESSAGE_BLOCKS)
+            ]
             data = Message(Role.ASSISTANT, blocks)
             if not self._heads:
                 return self._with_heads((Node.root(data),))
             return self.append_to(data, heads=self._heads)
         else:
-            # content is a single ContentBlock
-            if not isinstance(
-                content,
-                (TextContent, ThinkingContent, ToolUseContent, ToolResultContent),
-            ):
+            if not isinstance(content, _MESSAGE_BLOCKS):
                 raise TypeError("Invalid content type for assistant message")
             block = content
             all_content: list[ContentBlock] = [block, *more]
@@ -644,7 +640,10 @@ class DAG:
     def execute_tools(
         self,
         tool_calls: list[ToolUseContent],
-        handler: Callable[[ToolUseContent], TextContent | list[TextContent]],
+        handler: Callable[
+            [ToolUseContent],
+            "TextContent | ImageContent | list[TextContent | ImageContent]",
+        ],
     ) -> DAG:
         """High-level helper: execute tools and update graph automatically.
 
@@ -711,7 +710,11 @@ class DAG:
         self,
         response: Response,
         tool_handler: (
-            Callable[[ToolUseContent], TextContent | list[TextContent]] | None
+            Callable[
+                [ToolUseContent],
+                "TextContent | ImageContent | list[TextContent | ImageContent]",
+            ]
+            | None
         ) = None,
     ) -> DAG:
         """Add API response to graph, with optional automatic tool handling.
@@ -731,7 +734,9 @@ class DAG:
         """
         # Separate text/thinking from tool calls
         text_blocks: list[ContentBlock] = [
-            b for b in response.content if isinstance(b, (TextContent, ThinkingContent))
+            b
+            for b in response.content
+            if isinstance(b, (TextContent, ThinkingContent, ImageContent))
         ]
         tool_calls = [b for b in response.content if isinstance(b, ToolUseContent)]
 
@@ -1021,7 +1026,15 @@ class DAG:
             return "TOOLS", ", ".join(tool_names)
 
         elif isinstance(data, ToolExecution):
-            result_text = data.result[0].text if data.result else ""
+            if data.result:
+                first = data.result[0]
+                result_text = (
+                    first.text
+                    if isinstance(first, TextContent)
+                    else f"[image {first.media_type}]"
+                )
+            else:
+                result_text = ""
             return "EXEC", f"{data.tool_name} -> {truncate(result_text, 30)}"
 
         elif isinstance(data, StopReason):
@@ -1049,10 +1062,15 @@ class DAG:
                 thinking_blocks = [c for c in content if isinstance(c, ThinkingContent)]
 
                 if tool_results:
-                    # Show first result content
                     first_content = tool_results[0].content
                     if first_content:
-                        return "RESULT", truncate(first_content[0].text)
+                        first = first_content[0]
+                        preview = (
+                            first.text
+                            if isinstance(first, TextContent)
+                            else f"[image {first.media_type}]"
+                        )
+                        return "RESULT", truncate(preview)
                     return "RESULT", "(empty)"
                 elif tool_uses:
                     tools = [t.name for t in tool_uses]

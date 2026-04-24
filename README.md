@@ -45,7 +45,7 @@ dag.save("conversation.json")  # Save the graph
 uv run nano-agent-viewer conversation.json  # Creates conversation.html
 ```
 
-**Multi-Provider** - Works with Claude API, Claude Code OAuth, or Gemini API.
+**Multi-Provider** - Works with Claude API, Claude Code OAuth, Gemini API, OpenAI API, or ChatGPT/Codex OAuth.
 
 ## Quick Start
 
@@ -169,6 +169,15 @@ nano-cli --debug
 
 Note: Ctrl+J and Shift+Enter are not supported.
 
+## Chat Bots (Discord + Slack)
+
+Two chat frontends share the same agent core (queue/worker/session/tools):
+
+- **nano-discord-bot** — runs in Discord channels and threads.
+- **nano-slack-bot** — runs in Slack channels and threads via Socket Mode.
+
+Both use the same `bot/bot_state.py`, `bot/bot_agent.py`, session persistence under `logs/`, and agent loop. Platform-specific code lives in `bot/discord_bot.py` + `bot/bot_tools.py` and `bot/slack_bot.py` + `bot/slack_tools.py`.
+
 ## Discord Bot
 
 **nano-discord-bot** is an AI assistant that runs 24/7 as a Discord bot. It uses the same nano-agent core and tools to provide an agentic coding assistant directly in Discord channels and threads.
@@ -184,12 +193,35 @@ Note: Ctrl+J and Shift+Enter are not supported.
 ### Setup
 
 ```bash
+# Install with bot extras (discord.py, python-dotenv)
+uv sync --extra bot
+
 # Set your Discord bot token
 export DISCORD_BOT_TOKEN=your-token-here
 
-# Run the bot
+# Run the bot (default provider: Claude Code)
 uv run nano-discord-bot
 ```
+
+### Provider selection
+
+The bot supports two LLM providers, selected via `BOT_PROVIDER`:
+
+- **`claude`** (default) — Claude Code OAuth. Run `nano-agent-capture-auth` once to populate `~/.nano-agent.json`.
+- **`codex`** — ChatGPT/Codex OAuth. Reads `~/.codex/auth.json` and auto-refreshes the access token (every 8 days). Populate it either with the official `codex login` CLI, or with the built-in Python PKCE flow:
+
+  ```bash
+  # One-time login (opens a browser, binds 127.0.0.1:1455)
+  uv run python -m nano_agent.providers.codex_login
+
+  # Run the bot against Codex
+  BOT_PROVIDER=codex uv run nano-discord-bot
+
+  # Optional: override the model (default: gpt-5.5)
+  CODEX_MODEL=gpt-5.5 BOT_PROVIDER=codex uv run nano-discord-bot
+  ```
+
+  **Remote servers:** the OAuth flow needs a local browser and port 1455. If the bot runs on a headless host, log in locally first, then copy `~/.codex/auth.json` to the server. Auto-refresh keeps it alive from there; `/renew` only works on a host where the browser + port 1455 are reachable.
 
 ### Slash Commands
 
@@ -200,8 +232,70 @@ uv run nano-discord-bot
 | `/cd <path>` | Change working directory |
 | `/cwd` | Show current working directory |
 | `/thread <topic>` | Start a new conversation in a Discord thread |
-| `/renew` | Refresh Claude Code OAuth token |
+| `/renew` | Re-run OAuth login for the active provider |
 | `/explore` | Explore visible Discord context (guild/channels/threads) |
+
+## Slack Bot
+
+**nano-slack-bot** is the Slack counterpart. Same queue-based architecture, same `BOT_PROVIDER` switch (Claude Code or Codex), same agent loop — but driven by Slack events via [slack-bolt](https://slack.dev/bolt-python/) Socket Mode.
+
+### Slack app setup
+
+A ready-made manifest is at [`bot/slack_manifest.json`](bot/slack_manifest.json) — it declares every scope, event, and slash command the bot needs. Fastest setup:
+
+1. Go to https://api.slack.com/apps → **Create New App** → **From an app manifest** → pick a workspace.
+2. Paste the contents of `bot/slack_manifest.json` into the JSON tab and submit. Review and create.
+3. **Basic Information** → **App-Level Tokens** → **Generate** with the `connections:write` scope. This gives you the `xapp-…` token.
+4. **Install to Workspace**. Copy the Bot User OAuth Token (`xoxb-…`) from **OAuth & Permissions**.
+5. Put both tokens in `.env`:
+   - `SLACK_BOT_TOKEN=xoxb-…`
+   - `SLACK_APP_TOKEN=xapp-…`
+
+If you want to set things up manually instead, the manifest encodes:
+- **Bot scopes**: `app_mentions:read`, `chat:write`, `channels:history`, `channels:read`, `groups:history`, `groups:read`, `im:history`, `im:read`, `im:write`, `mpim:history`, `mpim:read`, `files:write`, `users:read`, `commands`.
+- **Event subscriptions**: `app_mention`, `message.channels`, `message.groups`, `message.im`, `message.mpim`.
+- **Slash commands**: `/clear`, `/queue`, `/cd`, `/cwd`, `/thread`, `/renew`.
+- **Socket Mode**: on (no public HTTP endpoint needed).
+
+### Setup
+
+```bash
+# Install with bot extras (also installs discord.py, slack-bolt, slack-sdk)
+uv sync --extra bot
+
+# Add tokens to .env
+echo "SLACK_BOT_TOKEN=xoxb-…" >> .env
+echo "SLACK_APP_TOKEN=xapp-…" >> .env
+
+# Run the bot (default provider: Claude Code)
+uv run nano-slack-bot
+
+# Or with Codex OAuth
+BOT_PROVIDER=codex uv run nano-slack-bot
+```
+
+### Behavior
+
+- **DMs** to the bot: always answered.
+- **Channel messages**: the bot responds when **mentioned** (`@nano-bot`), or when a user replies in a thread the bot is already in. Set `SLACK_RESPOND_TO_ALL_MESSAGES=true` to respond to every message in channels the bot is in (not recommended for busy workspaces).
+- **Threads**: each thread is its own conversation (keyed by `channel_id:thread_ts`). Channel-level messages reply in-thread by default so the main channel stays tidy.
+
+### Slash Commands
+
+Same surface as Discord — names differ only in platform flavor:
+
+| Command | Description |
+|---------|-------------|
+| `/clear` | Clear conversation history in the current channel |
+| `/queue` | Show queued user messages |
+| `/cd <path>` | Change working directory |
+| `/cwd` | Show current working directory |
+| `/thread <topic>` | Open a new thread in the current channel and start a conversation |
+| `/renew` | Re-run OAuth login for the active provider |
+
+### Slack-specific tools
+
+The agent gets Slack analogues of the Discord tools: `SendUserMessage`, `SendFile` (`files_upload_v2`), `CreateThread`, `ExploreSlack`, `SlackAPI`, plus the shared queue tools. `SlackAPI` can call any Web API method — use `action=discover` to inspect context, then `action=request` with `method` and `body_json`.
 
 ## Sub-Agents
 

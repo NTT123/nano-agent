@@ -5,7 +5,10 @@ to provide an AI assistant. Each user gets their own conversation session.
 
 Usage:
     1. Set DISCORD_BOT_TOKEN in .env or environment
-    2. uv run nano-discord-bot
+    2. (Optional) set BOT_PROVIDER=codex to use ChatGPT/Codex OAuth instead of
+       Claude Code. Codex mode reads ~/.codex/auth.json; run
+       ``python -m nano_agent.providers.codex_login`` to populate it.
+    3. uv run nano-discord-bot
 """
 
 import json
@@ -17,13 +20,16 @@ import discord
 from discord import app_commands
 from dotenv import load_dotenv
 
-from nano_agent import DAG, ClaudeCodeAPI
+from nano_agent import DAG
+from nano_agent.providers.base import APIProtocol
 
 from .bot_agent import ensure_channel_worker
+from .bot_config import async_renew_oauth, build_api_from_env
 from .bot_state import BotState, chunk_message, truncate
-from .bot_tools import build_discord_explore_payload, get_tools
+from .bot_tools import build_discord_explore_payload, get_discord_tools
 
 load_dotenv()
+
 
 SYSTEM_PROMPT = (
     "You are an assistant running 24/7 on a machine. "
@@ -65,14 +71,15 @@ BOT_PERMISSIONS = discord.Permissions(
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
-api = ClaudeCodeAPI()
+api: APIProtocol = build_api_from_env()
 state = BotState(bot=bot)
+state.tools_factory = lambda: get_discord_tools(state)
 
 
 def _create_session(cwd: str | None = None) -> DAG:
     """Helper that wires SYSTEM_PROMPT and tools into state.create_session."""
     return state.create_session(
-        cwd, system_prompt=SYSTEM_PROMPT, tools=get_tools(state)
+        cwd, system_prompt=SYSTEM_PROMPT, tools=get_discord_tools(state)
     )
 
 
@@ -86,10 +93,16 @@ async def recover_pending_queues() -> None:
         if pending <= 0:
             continue
 
-        channel = bot.get_channel(channel_id)
+        try:
+            numeric_id = int(channel_id)
+        except ValueError:
+            print(f"[QUEUE_RECOVER] Skipping non-numeric channel id: {channel_id}")
+            continue
+
+        channel = bot.get_channel(numeric_id)
         if channel is None:
             try:
-                channel = await bot.fetch_channel(channel_id)
+                channel = await bot.fetch_channel(numeric_id)
             except Exception as e:
                 print(f"[QUEUE_RECOVER] Failed to fetch channel {channel_id}: {e}")
                 continue
@@ -97,7 +110,7 @@ async def recover_pending_queues() -> None:
         print(
             f"[QUEUE_RECOVER] Resuming queue for channel {channel_id} (pending={pending})"
         )
-        ensure_channel_worker(state, api, channel, SYSTEM_PROMPT)
+        ensure_channel_worker(state, api, channel, channel_id, SYSTEM_PROMPT)
 
 
 # --- Discord events ---
@@ -139,9 +152,11 @@ async def on_app_command_error(
     name="clear", description="Clear conversation history in this channel/thread"
 )
 async def clear_command(interaction: discord.Interaction) -> None:
-    cwd = state.working_dirs.get(interaction.user.id)
-    state.set_session(interaction.channel_id, _create_session(cwd))
-    state.clear_user_queue(interaction.channel_id)
+    user_id = str(interaction.user.id)
+    channel_id = str(interaction.channel_id)
+    cwd = state.working_dirs.get(user_id)
+    state.set_session(channel_id, _create_session(cwd))
+    state.clear_user_queue(channel_id)
     await interaction.response.send_message("Conversation cleared.")
 
 
@@ -150,10 +165,10 @@ async def clear_command(interaction: discord.Interaction) -> None:
 )
 @app_commands.describe(limit="How many queued messages to preview (1-20)")
 async def queue_command(interaction: discord.Interaction, limit: int = 5) -> None:
-    channel_id = interaction.channel_id
-    if channel_id is None:
+    if interaction.channel_id is None:
         await interaction.response.send_message("Cannot inspect queue in this context.")
         return
+    channel_id = str(interaction.channel_id)
 
     bounded_limit = max(1, min(limit, 20))
     queue = state.get_channel_queue(channel_id)
@@ -194,8 +209,8 @@ async def cd_command(interaction: discord.Interaction, path: str) -> None:
     if not os.path.isdir(resolved):
         await interaction.response.send_message(f"Not a directory: `{resolved}`")
         return
-    state.working_dirs[interaction.user.id] = resolved
-    state.set_session(interaction.channel_id, _create_session(resolved))
+    state.working_dirs[str(interaction.user.id)] = resolved
+    state.set_session(str(interaction.channel_id), _create_session(resolved))
     await interaction.response.send_message(
         f"Working directory: `{resolved}` (conversation reset)"
     )
@@ -203,7 +218,7 @@ async def cd_command(interaction: discord.Interaction, path: str) -> None:
 
 @tree.command(name="cwd", description="Show current working directory")
 async def cwd_command(interaction: discord.Interaction) -> None:
-    cwd = state.working_dirs.get(interaction.user.id, os.getcwd())
+    cwd = state.working_dirs.get(str(interaction.user.id), os.getcwd())
     await interaction.response.send_message(f"Working directory: `{cwd}`")
 
 
@@ -225,23 +240,21 @@ async def thread_command(
         name=topic,
         type=discord.ChannelType.public_thread,
     )
-    cwd = state.working_dirs.get(interaction.user.id)
-    state.set_session(thread.id, _create_session(cwd))
+    cwd = state.working_dirs.get(str(interaction.user.id))
+    state.set_session(str(thread.id), _create_session(cwd))
     await interaction.response.send_message(f"Thread created: {thread.mention}")
     await thread.send(
         f"New conversation started: **{topic}**\nSend messages here to chat."
     )
 
 
-@tree.command(name="renew", description="Refresh Claude Code OAuth token")
+@tree.command(name="renew", description="Re-run OAuth login for the active provider")
 async def renew_command(interaction: discord.Interaction) -> None:
     await interaction.response.defer()
     try:
-        from nano_agent.providers.capture_claude_code_auth import async_get_config
-
-        await async_get_config(timeout=30)
+        await async_renew_oauth()
         global api
-        api = ClaudeCodeAPI()
+        api = build_api_from_env()
         state.delete_all_session_files()
         state.sessions.clear()
         await interaction.followup.send("OAuth token refreshed successfully.")
@@ -302,16 +315,23 @@ async def on_message(message: discord.Message) -> None:
     if not content:
         return
 
-    channel_id = message.channel.id
-    user_id = message.author.id
+    channel_id = str(message.channel.id)
+    user_id = str(message.author.id)
     state.channel_last_user_id[channel_id] = user_id
 
-    queued = state.enqueue_user_message(channel_id, message, content)
+    queued = state.enqueue_user_message(
+        channel_id,
+        message_id=str(message.id),
+        author_id=user_id,
+        author=str(message.author),
+        content=content,
+        attachments=[a.url for a in message.attachments],
+    )
     print(
         f"[MSG_QUEUED] {message.author} (channel {channel_id}) "
         f"queue_id={queued['queue_id']} pending={len(state.get_channel_queue(channel_id))}"
     )
-    ensure_channel_worker(state, api, message.channel, SYSTEM_PROMPT)
+    ensure_channel_worker(state, api, message.channel, channel_id, SYSTEM_PROMPT)
 
 
 # --- Entry point ---

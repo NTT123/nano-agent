@@ -11,6 +11,7 @@ import httpx
 from ..dag import DAG
 from ..data_structures import (
     ContentBlock,
+    ImageContent,
     Message,
     Response,
     Role,
@@ -21,6 +22,7 @@ from ..data_structures import (
     Usage,
 )
 from ..tools import Tool
+from .base import responses_tool_result_item, responses_user_image_item
 
 __all__ = ["OpenAIAPI"]
 
@@ -160,18 +162,20 @@ class OpenAIAPI:
                         func_call["id"] = block.item_id
                     items.append(func_call)
                 elif isinstance(block, ToolResultContent):
-                    # Tool result
-                    result_text = "".join(tb.text for tb in block.content)
-                    items.append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": block.tool_use_id,
-                            "output": result_text,
-                        }
-                    )
-                # Skip ThinkingContent - OpenAI uses reasoning separately
+                    items.append(responses_tool_result_item(block))
+                elif isinstance(block, ImageContent):
+                    if text_parts:
+                        items.append(
+                            {
+                                "role": msg.role.value,
+                                "content": [
+                                    {"type": text_type, "text": "\n".join(text_parts)}
+                                ],
+                            }
+                        )
+                        text_parts = []
+                    items.append(responses_user_image_item(msg, block))
 
-            # Flush remaining text
             if text_parts:
                 items.append(
                     {

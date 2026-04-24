@@ -27,6 +27,12 @@ dependencies = [
 
 [project.optional-dependencies]
 tmux = ["libtmux>=0.37.0"]
+bot = [
+    "discord.py>=2.3.0",
+    "python-dotenv>=1.0.0",
+    "slack-bolt>=1.18.0",
+    "slack-sdk>=3.27.0",
+]
 
 [project.urls]
 Homepage = "https://github.com/NTT123/nano_agent"
@@ -43,6 +49,7 @@ nano-agent-viewer = "scripts.viewer:main"
 nano-agent-console-viewer = "scripts.console_viewer:main"
 nano-agent-capture-auth = "nano_agent.providers.capture_claude_code_auth:main"
 nano-discord-bot = "bot.discord_bot:main"
+nano-slack-bot = "bot.slack_bot:main"
 
 [build-system]
 requires = ["hatchling"]
@@ -89,6 +96,11 @@ disable_error_code = ["misc", "untyped-decorator"]
 module = "bot.discord_bot"
 # discord.py decorators don't preserve types
 disable_error_code = ["untyped-decorator"]
+
+[[tool.mypy.overrides]]
+module = "bot.slack_bot"
+# slack-bolt decorators don't preserve types
+disable_error_code = ["untyped-decorator", "misc"]
 
 [[tool.mypy.overrides]]
 module = "bot.test_bot"

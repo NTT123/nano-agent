@@ -9,7 +9,7 @@ import httpx
 
 from .cancellation import CancellationToken
 from .dag import DAG
-from .data_structures import Response, TextContent
+from .data_structures import ImageContent, Response, TextContent
 from .execution_context import ExecutionContext
 from .providers.base import APIError, APIProtocol
 
@@ -174,7 +174,9 @@ async def run(
                         text="Permission denied: User rejected the edit operation. "
                         "The file was NOT modified."
                     )
-                    denied_result_list = [denied_result]
+                    denied_result_list: list[TextContent | ImageContent] = [
+                        denied_result
+                    ]
                     result_node = tool_use_head.child(
                         ToolExecution(
                             tool_name=call.name,
@@ -238,9 +240,10 @@ async def run(
                 )
                 continue
 
-            # Normalize content to list
             result = tool_result.content
-            result_list = result if isinstance(result, list) else [result]
+            result_list: list[TextContent | ImageContent] = (
+                list(result) if isinstance(result, list) else [result]
+            )
 
             # Check if tool returned a SubGraph (sub-agent execution)
             # SubGraph runs first, then produces the ToolExecution result

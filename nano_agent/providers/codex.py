@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import uuid
 from collections.abc import Sequence
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -12,6 +16,7 @@ import httpx
 from ..dag import DAG
 from ..data_structures import (
     ContentBlock,
+    ImageContent,
     Message,
     Response,
     Role,
@@ -22,35 +27,91 @@ from ..data_structures import (
     Usage,
 )
 from ..tools import Tool
-from .codex_auth import get_codex_access_token
+from .base import responses_tool_result_item, responses_user_image_item
+from .codex_auth import (
+    DEFAULT_CODEX_AUTH_PATH,
+    REFRESH_AFTER_DAYS,
+    get_codex_access_token,
+    get_codex_account_id,
+    load_codex_auth,
+    maybe_refresh,
+    parse_iso,
+)
 
 __all__ = ["CodexAPI"]
 
 
 class CodexAPI:
-    """Codex Responses API client using ChatGPT OAuth access tokens."""
+    """Codex Responses API client using ChatGPT OAuth access tokens.
+
+    Two modes:
+      - Static: pass ``auth_token``. The token is used as-is; the caller is
+        responsible for refresh. ``account_id`` may optionally be passed.
+      - File-backed: pass ``auth_file`` (default: ``~/.codex/auth.json``). On
+        each ``send()`` the file is reloaded and access_token is auto-refreshed
+        when older than ``REFRESH_AFTER_DAYS``. This is the recommended mode
+        for long-running processes.
+    """
 
     def __init__(
         self,
         auth_token: str | None = None,
-        model: str = "gpt-5.2-codex",
+        model: str = "gpt-5.5",
         base_url: str = "https://chatgpt.com/backend-api/codex/responses",
         parallel_tool_calls: bool = True,
         reasoning: bool = True,
+        reasoning_effort: str = "high",
+        auth_file: Path | str | None = None,
+        account_id: str | None = None,
     ) -> None:
-        resolved = auth_token or get_codex_access_token()
-        if not resolved:
-            raise ValueError(
-                "Codex OAuth token required. Ensure Codex is configured to store "
-                "auth in file mode (~/.codex/auth.json) or pass auth_token."
-            )
+        self._auth_file: Path | None = None
+        if (
+            auth_token is None
+            and auth_file is None
+            and DEFAULT_CODEX_AUTH_PATH.exists()
+        ):
+            auth_file = DEFAULT_CODEX_AUTH_PATH
+
+        self._last_refresh_at: datetime | None = None
+        if auth_file is not None:
+            self._auth_file = Path(auth_file)
+            data = load_codex_auth(self._auth_file)
+            if not data:
+                raise ValueError(
+                    f"Codex auth file missing or invalid: {self._auth_file}. "
+                    "Run `codex login` or nano_agent.providers.codex_login first."
+                )
+            tokens = data.get("tokens") or {}
+            resolved = tokens.get("access_token")
+            if not resolved:
+                raise ValueError(
+                    f"No access_token in {self._auth_file}; re-login required."
+                )
+            self.account_id = account_id or tokens.get("account_id")
+            self._last_refresh_at = parse_iso(data.get("last_refresh"))
+        else:
+            resolved = auth_token or get_codex_access_token()
+            if not resolved:
+                raise ValueError(
+                    "Codex OAuth token required. Pass auth_token, auth_file, or "
+                    "run `codex login` to populate ~/.codex/auth.json."
+                )
+            self.account_id = account_id or get_codex_account_id()
 
         self.auth_token = resolved
         self.model = model
         self.base_url = base_url
         self.parallel_tool_calls = parallel_tool_calls
         self.reasoning = reasoning
+        self.reasoning_effort = reasoning_effort
         self._client = httpx.AsyncClient(timeout=60.0)
+        # One session_id per client, mirroring the Codex CLI; a fresh UUID per
+        # request would make every call look like a new session to the backend.
+        self._session_id = str(uuid.uuid4())
+        # Serializes refresh across concurrent send() calls so we don't double-
+        # spend the rotating refresh_token when multiple workers hit the 8-day
+        # threshold simultaneously.
+        self._refresh_lock = asyncio.Lock()
 
     def __repr__(self) -> str:
         token_preview = (
@@ -105,14 +166,19 @@ class CodexAPI:
                         }
                     )
                 elif isinstance(block, ToolResultContent):
-                    result_text = "".join(tb.text for tb in block.content)
-                    items.append(
-                        {
-                            "type": "function_call_output",
-                            "call_id": block.tool_use_id,
-                            "output": result_text,
-                        }
-                    )
+                    items.append(responses_tool_result_item(block))
+                elif isinstance(block, ImageContent):
+                    if text_parts:
+                        items.append(
+                            {
+                                "role": msg.role.value,
+                                "content": [
+                                    {"type": text_type, "text": "\n".join(text_parts)}
+                                ],
+                            }
+                        )
+                        text_parts = []
+                    items.append(responses_user_image_item(msg, block))
 
             if text_parts:
                 items.append(
@@ -154,12 +220,47 @@ class CodexAPI:
             if isinstance(items, dict):
                 self._force_required_all(items)
 
+    def _refresh_fresh_enough(self) -> bool:
+        """True if the in-memory last_refresh timestamp is within the window."""
+        if self._last_refresh_at is None:
+            return False
+        age_days = (
+            datetime.now(timezone.utc) - self._last_refresh_at
+        ).total_seconds() / 86400
+        return age_days < REFRESH_AFTER_DAYS
+
+    async def _refresh_if_file_backed(self) -> None:
+        """If auth_file is set, reload + maybe-refresh tokens from disk.
+
+        Short-circuits without disk I/O or locking when the in-memory
+        ``_last_refresh_at`` is within the refresh window. This keeps send()
+        off disk on the hot path; the lock is only taken when we actually
+        need to re-check / rotate tokens.
+        """
+        if self._auth_file is None or self._refresh_fresh_enough():
+            return
+        async with self._refresh_lock:
+            # Another coroutine may have refreshed while we waited.
+            if self._refresh_fresh_enough():
+                return
+            data = load_codex_auth(self._auth_file)
+            if not data:
+                return
+            data = await maybe_refresh(data, self._auth_file, self._client)
+            tokens = data.get("tokens") or {}
+            if tokens.get("access_token"):
+                self.auth_token = tokens["access_token"]
+            if tokens.get("account_id"):
+                self.account_id = tokens["account_id"]
+            self._last_refresh_at = parse_iso(data.get("last_refresh"))
+
     async def send(
         self,
         messages: list[Message] | DAG,
         tools: Sequence[Tool] | None = None,
         system_prompt: str | None = None,
     ) -> Response:
+        await self._refresh_if_file_backed()
         if isinstance(messages, DAG):
             dag = messages
             actual_messages = dag.to_messages()
@@ -190,7 +291,10 @@ class CodexAPI:
 
         # Add reasoning if enabled
         if self.reasoning:
-            request_body["reasoning"] = {"effort": "high", "summary": "detailed"}
+            request_body["reasoning"] = {
+                "effort": self.reasoning_effort,
+                "summary": "detailed",
+            }
             request_body["include"] = ["reasoning.encrypted_content"]
 
         if tools:
@@ -208,13 +312,20 @@ class CodexAPI:
         self, request_body: dict[str, Any]
     ) -> dict[str, Any] | None:
         last_response: dict[str, Any] | None = None
+        headers: dict[str, str] = {
+            "Authorization": f"Bearer {self.auth_token}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+            "originator": "codex_cli_rs",
+            "session_id": self._session_id,
+            "OpenAI-Beta": "responses=experimental",
+        }
+        if self.account_id:
+            headers["chatgpt-account-id"] = self.account_id
         async with self._client.stream(
             "POST",
             self.base_url,
-            headers={
-                "Authorization": f"Bearer {self.auth_token}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             json=request_body,
         ) as resp:
             if resp.status_code != 200:
@@ -224,8 +335,10 @@ class CodexAPI:
                     f"Codex API HTTP {resp.status_code}: {snippet or 'empty response'}"
                 )
 
-            content_type = resp.headers.get("content-type", "")
-            if "text/event-stream" not in content_type:
+            content_type = resp.headers.get("content-type") or ""
+            # The chatgpt.com/backend-api/codex/responses endpoint omits
+            # content-type on streamed responses; treat empty as SSE.
+            if content_type and "text/event-stream" not in content_type:
                 data = await resp.aread()
                 text = data.decode("utf-8", errors="ignore")
                 if os.environ.get("NANO_CLI_DEBUG_HTTP") == "1":
@@ -252,6 +365,11 @@ class CodexAPI:
                 return payload if isinstance(payload, dict) else None
 
             last_event_type: str | None = None
+            # The chatgpt.com/backend-api/codex/responses endpoint streams output
+            # items via response.output_item.done but returns an empty `output`
+            # array in the final response.completed event. Collect items from
+            # output_item.done and attach them so _parse_response sees them.
+            collected_items: list[dict[str, Any]] = []
             async for line in resp.aiter_lines():
                 if not line:
                     continue
@@ -264,11 +382,20 @@ class CodexAPI:
                     event = json.loads(payload)
                 except json.JSONDecodeError:
                     continue
-                last_event_type = event.get("type")
-                if event.get("type") == "response.completed":
+                etype = event.get("type")
+                last_event_type = etype
+                if etype == "response.completed":
                     last_response = event.get("response")
+                elif etype == "response.output_item.done":
+                    item = event.get("item") or {}
+                    if item.get("type") in ("reasoning", "message", "function_call"):
+                        collected_items.append(item)
                 if event.get("error"):
                     raise RuntimeError(f"Codex API error: {event['error']}")
+
+            if last_response is not None and not last_response.get("output"):
+                if collected_items:
+                    last_response = {**last_response, "output": collected_items}
             if last_response is None and last_event_type:
                 raise RuntimeError(
                     f"No response received from Codex endpoint (last event: {last_event_type})."

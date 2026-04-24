@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import base64
+import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, ClassVar
 
-from ..data_structures import TextContent
+from ..data_structures import ImageContent, TextContent
 from ..execution_context import ExecutionContext
 from .base import Desc, Tool, TruncationConfig, _format_size
+
+# Only these image types are forwarded to the model; others are read as text.
+_SUPPORTED_IMAGE_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp"}
+)
+
+# Cap raw image bytes — base64 inflates ~4/3, context window hates >~7MB payloads.
+_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
 
 @dataclass
@@ -55,7 +65,7 @@ Note: For binary files (images, PDFs), content is processed differently."""
         self,
         input: ReadInput,
         execution_context: ExecutionContext | None = None,
-    ) -> TextContent:
+    ) -> TextContent | ImageContent:
         """Read file contents with metadata and smart defaults."""
         path = Path(input.file_path)
 
@@ -69,6 +79,19 @@ Note: For binary files (images, PDFs), content is processed differently."""
             # Get file metadata
             file_size = path.stat().st_size
             size_str = _format_size(file_size)
+
+            guessed_type, _ = mimetypes.guess_type(path.name)
+            if guessed_type in _SUPPORTED_IMAGE_TYPES:
+                if file_size > _IMAGE_MAX_BYTES:
+                    return TextContent(
+                        text=(
+                            f"Error: Image {input.file_path} is {size_str}, "
+                            f"exceeds the {_format_size(_IMAGE_MAX_BYTES)} limit. "
+                            "Resize or crop before reading."
+                        )
+                    )
+                data = base64.standard_b64encode(path.read_bytes()).decode("ascii")
+                return ImageContent(data=data, media_type=guessed_type)
 
             # Read content
             content = path.read_text()

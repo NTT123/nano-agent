@@ -159,8 +159,10 @@ class FireworksAPI:
                         func_call["id"] = block.item_id
                     items.append(func_call)
                 elif isinstance(block, ToolResultContent):
-                    # Tool result
-                    result_text = "".join(tb.text for tb in block.content)
+                    # Tool result — Fireworks supports text only here.
+                    result_text = "".join(
+                        tb.text for tb in block.content if isinstance(tb, TextContent)
+                    )
                     items.append(
                         {
                             "type": "function_call_output",
@@ -169,7 +171,6 @@ class FireworksAPI:
                         }
                     )
 
-            # Flush remaining text
             if text_parts:
                 items.append(
                     {

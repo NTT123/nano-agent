@@ -104,19 +104,39 @@ class ToolUseContentDict(TypedDict):
     cache_control: NotRequired[CacheControl]
 
 
+class ImageSourceDict(TypedDict):
+    """Anthropic-format image source (base64)."""
+
+    type: str  # "base64"
+    media_type: str
+    data: str
+
+
+class ImageContentDict(TypedDict):
+    """Serialized form of ImageContent (Anthropic wire format)."""
+
+    type: str  # "image"
+    source: ImageSourceDict
+    cache_control: NotRequired[CacheControl]
+
+
 class ToolResultContentDict(TypedDict):
     """Serialized form of ToolResultContent."""
 
     type: str
     tool_use_id: str
-    content: list[TextContentDict]
+    content: list[TextContentDict | ImageContentDict]
     is_error: bool
     cache_control: NotRequired[CacheControl]
 
 
 # Forward reference for MessageDict (content can be string or list of content blocks)
 ContentBlockDict = (
-    TextContentDict | ThinkingContentDict | ToolUseContentDict | ToolResultContentDict
+    TextContentDict
+    | ThinkingContentDict
+    | ToolUseContentDict
+    | ToolResultContentDict
+    | ImageContentDict
 )
 
 
@@ -157,7 +177,7 @@ class ToolExecutionDict(TypedDict):
     type: str
     tool_name: str
     tool_use_id: str
-    result: list[TextContentDict]
+    result: list[TextContentDict | ImageContentDict]
     is_error: bool
 
 
@@ -398,11 +418,50 @@ class ToolUseContent:
 
 
 @dataclass(frozen=True)
+class ImageContent:
+    """Image content block (base64-encoded).
+
+    Serializes to Anthropic's ``{"type": "image", "source": {...}}`` shape.
+    Providers that use a different wire format (OpenAI Responses
+    ``input_image`` etc.) adapt at the provider layer.
+    """
+
+    data: str  # base64-encoded image bytes (no data: prefix)
+    media_type: str = "image/png"  # e.g. image/png, image/jpeg, image/gif, image/webp
+
+    def display_str(self) -> str:
+        """Short placeholder for UI rendering and text serialization."""
+        return f"[image {self.media_type}, {len(self.data)} b64 chars]"
+
+    def to_dict(self) -> ImageContentDict:
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": self.media_type,
+                "data": self.data,
+            },
+        }
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "ImageContent":
+        source = data.get("source")
+        if isinstance(source, Mapping):
+            media_type = source.get("media_type", "image/png")
+            payload = source.get("data", "")
+            return cls(
+                data=str(payload) if payload is not None else "",
+                media_type=str(media_type) if media_type is not None else "image/png",
+            )
+        return cls(data="", media_type="image/png")
+
+
+@dataclass(frozen=True)
 class ToolResultContent:
     """Tool result content block."""
 
     tool_use_id: str
-    content: list[TextContent]
+    content: list[TextContent | ImageContent]
     is_error: bool = False
 
     def __post_init__(self) -> None:
@@ -420,12 +479,18 @@ class ToolResultContent:
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> "ToolResultContent":
         raw_content = data.get("content", [])
+        content: list[TextContent | ImageContent]
         if isinstance(raw_content, str):
             content = [TextContent(text=raw_content)]
         elif isinstance(raw_content, list):
-            content = [
-                TextContent.from_dict(c) for c in raw_content if isinstance(c, Mapping)
-            ]
+            content = []
+            for c in raw_content:
+                if not isinstance(c, Mapping):
+                    continue
+                if c.get("type") == "image":
+                    content.append(ImageContent.from_dict(c))
+                else:
+                    content.append(TextContent.from_dict(c))
         else:
             content = [TextContent(text=str(raw_content))]
         return cls(
@@ -437,7 +502,20 @@ class ToolResultContent:
 
 # Sum type for content blocks (algebraic data type)
 # Use class-based pattern matching: match block: case TextContent(): ...
-ContentBlock = TextContent | ThinkingContent | ToolUseContent | ToolResultContent
+ContentBlock = (
+    TextContent | ThinkingContent | ToolUseContent | ToolResultContent | ImageContent
+)
+
+
+def render_content_text(block: TextContent | ImageContent) -> str:
+    """Render a text-or-image block to a single display string.
+
+    Used by CLI/bot/examples to linearize tool output for display without
+    caring whether the block is text or a base64 image payload.
+    """
+    if isinstance(block, TextContent):
+        return block.text
+    return block.display_str()
 
 
 # =============================================================================
@@ -548,7 +626,7 @@ class ToolExecution:
 
     tool_name: str
     tool_use_id: str
-    result: list[TextContent]
+    result: list[TextContent | ImageContent]
     is_error: bool = False
 
     def __post_init__(self) -> None:
@@ -569,12 +647,18 @@ class ToolExecution:
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> "ToolExecution":
         raw_result = data.get("result", [])
+        result: list[TextContent | ImageContent]
         if isinstance(raw_result, str):
             result = [TextContent(text=raw_result)]
         elif isinstance(raw_result, list):
-            result = [
-                TextContent.from_dict(r) for r in raw_result if isinstance(r, Mapping)
-            ]
+            result = []
+            for r in raw_result:
+                if not isinstance(r, Mapping):
+                    continue
+                if r.get("type") == "image":
+                    result.append(ImageContent.from_dict(r))
+                else:
+                    result.append(TextContent.from_dict(r))
         else:
             result = [TextContent(text=str(raw_result))]
         return cls(
@@ -720,17 +804,24 @@ def parse_content_block(raw: object) -> "ContentBlock | None":
         content = raw.get("content")
         if not isinstance(tool_use_id, str) or not isinstance(content, list):
             return None
-        parsed: list[TextContent] = []
+        parsed: list[TextContent | ImageContent] = []
         for item in content:
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parsed.append(TextContent(text=text))
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "image":
+                parsed.append(ImageContent.from_dict(item))
+                continue
+            text = item.get("text")
+            if isinstance(text, str):
+                parsed.append(TextContent(text=text))
         return ToolResultContent(
             tool_use_id=tool_use_id,
             content=parsed,
             is_error=bool(raw.get("is_error", False)),
         )
+
+    if block_type == "image":
+        return ImageContent.from_dict(raw)
 
     return None
 
@@ -783,15 +874,19 @@ def parse_tool_execution(raw: object) -> ToolExecution | None:
     if not isinstance(tool_name, str) or not isinstance(tool_use_id, str):
         return None
     raw_result = raw.get("result", [])
-    result: list[TextContent] = []
+    result: list[TextContent | ImageContent] = []
     if isinstance(raw_result, str):
         result = [TextContent(text=raw_result)]
     elif isinstance(raw_result, list):
         for item in raw_result:
-            if isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    result.append(TextContent(text=text))
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "image":
+                result.append(ImageContent.from_dict(item))
+                continue
+            text = item.get("text")
+            if isinstance(text, str):
+                result.append(TextContent(text=text))
     return ToolExecution(
         tool_name=tool_name,
         tool_use_id=tool_use_id,

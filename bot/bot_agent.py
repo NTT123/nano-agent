@@ -1,15 +1,22 @@
-"""Agent loop and channel worker for the Discord bot."""
+"""Agent loop and channel worker — platform-agnostic core.
+
+Discord and Slack frontends both drive this loop. ``channel`` is an opaque
+platform-specific reference (a ``discord.abc.Messageable`` or a
+``bot.slack_tools.SlackContext``) — tools read it from ``state.active_channel``
+to send replies. ``state.tools_factory`` produces the platform-appropriate
+tool set so reloaded sessions keep their original tools.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import os
 from dataclasses import dataclass
+from typing import Any
 
-import discord
 import httpx
 
-from nano_agent import DAG, ExecutionContext, Role, TextContent
+from nano_agent import DAG, ExecutionContext, ImageContent, Role, TextContent
 from nano_agent.dag import Node
 from nano_agent.data_structures import (
     Message,
@@ -33,8 +40,8 @@ class AgentLoopStats:
 async def agent_loop(
     api: APIProtocol,
     state: BotState,
-    channel: discord.abc.Messageable,
-    channel_id: int,
+    channel: Any,
+    channel_id: str,
     dag: DAG,
 ) -> tuple[DAG, AgentLoopStats]:
     """Run agent turns. Assistant text stays internal unless SendUserMessage is used."""
@@ -67,7 +74,7 @@ async def agent_loop(
                     f"Runtime event: pending queued user messages={pending_before}. "
                     "Queue is managed outside conversation history. "
                     "Use PeekQueuedUserMessages or DequeueUserMessages to inspect/consume. "
-                    "Only SendUserMessage sends text to Discord users."
+                    "Only SendUserMessage sends text to the user."
                 )
                 dag = dag.user(user_msg)
                 state.append_internal_log(
@@ -244,7 +251,9 @@ async def agent_loop(
                         continue
 
                     result = tool_result.content
-                    result_list = result if isinstance(result, list) else [result]
+                    result_list: list[TextContent | ImageContent] = (
+                        list(result) if isinstance(result, list) else [result]
+                    )
 
                     sub_graph_node = None
                     if tool_result.sub_graph is not None:
@@ -294,16 +303,23 @@ async def agent_loop(
 def ensure_channel_worker(
     state: BotState,
     api: APIProtocol,
-    channel: discord.abc.Messageable,
+    channel: Any,
+    channel_id: str,
     system_prompt: str,
 ) -> None:
-    """Ensure exactly one worker is running for this channel."""
-    channel_id = channel.id
+    """Ensure exactly one worker is running for this channel.
+
+    ``channel_id`` is the queue/session key (str). Callers are responsible for
+    deriving it from their platform handle (e.g. ``str(discord_channel.id)``
+    or the composite ``"C123:1234.567"`` for a Slack thread).
+    """
     existing = state.channel_worker_tasks.get(channel_id)
     if existing is not None and not existing.done():
         return
 
-    task = asyncio.create_task(channel_worker(state, api, channel, system_prompt))
+    task = asyncio.create_task(
+        channel_worker(state, api, channel, channel_id, system_prompt)
+    )
     state.channel_worker_tasks[channel_id] = task
 
     def _cleanup(done_task: asyncio.Task[None]) -> None:
@@ -316,11 +332,11 @@ def ensure_channel_worker(
 async def channel_worker(
     state: BotState,
     api: APIProtocol,
-    channel: discord.abc.Messageable,
+    channel: Any,
+    channel_id: str,
     system_prompt: str,
 ) -> None:
     """Process queued messages for a channel until no immediate progress is made."""
-    channel_id = channel.id
     passes = 0
     max_passes = 8
 
@@ -332,11 +348,9 @@ async def channel_worker(
         user_id = state.channel_last_user_id.get(channel_id)
         cwd = state.working_dirs.get(user_id) if user_id is not None else None
 
-        # Import here to avoid circular dependency — get_tools needs state
-        from .bot_tools import get_tools
-
+        tools = state.tools_factory() if state.tools_factory else []
         dag = state.get_session(
-            channel_id, cwd, system_prompt=system_prompt, tools=get_tools(state)
+            channel_id, cwd, system_prompt=system_prompt, tools=tools
         )
 
         async with state.agent_runtime_lock:
@@ -360,9 +374,7 @@ async def channel_worker(
             state.clear_context_requested.discard(channel_id)
             state.set_session(
                 channel_id,
-                state.create_session(
-                    cwd, system_prompt=system_prompt, tools=get_tools(state)
-                ),
+                state.create_session(cwd, system_prompt=system_prompt, tools=tools),
             )
             state.clear_user_queue(channel_id)
             return
