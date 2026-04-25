@@ -23,7 +23,7 @@ from ..data_structures import (
     Usage,
 )
 from ..tools import Tool
-from .base import APIError
+from .base import APIError, unpack_dag_or_args
 
 __all__ = ["FireworksAPI"]
 
@@ -276,18 +276,9 @@ class FireworksAPI:
         Returns:
             Response object
         """
-        # Type dispatch
-        if isinstance(messages, DAG):
-            dag = messages
-            actual_messages = dag.to_messages()
-            actual_tools: list[Tool] = list(dag._tools or [])
-            dag_system_prompts = dag.head.get_system_prompts() if dag._heads else []
-
-            messages = actual_messages
-            tools = actual_tools if actual_tools else None
-
-            if dag_system_prompts:
-                system_prompt = "\n\n".join(dag_system_prompts)
+        messages, tools, system_prompt = unpack_dag_or_args(
+            messages, tools, system_prompt
+        )
 
         # Build input array - start with system prompt if provided
         input_items: list[dict[str, Any]] = []

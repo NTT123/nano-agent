@@ -13,7 +13,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Never, NotRequired, Required, TypeAlias, TypedDict
+from typing import Any, ClassVar, Never, NotRequired, Required, TypeAlias, TypedDict
 
 # =============================================================================
 # Token estimation
@@ -119,6 +119,13 @@ class ThinkingContentDict(TypedDict, total=False):
     summary: list[SummaryItem]
 
 
+class CompactionContentDict(TypedDict):
+    """Serialized form of CompactionContent."""
+
+    type: str
+    encrypted_content: str
+
+
 class ToolUseContentDict(TypedDict):
     """Serialized form of ToolUseContent."""
 
@@ -162,6 +169,7 @@ ContentBlockDict = (
     | ToolUseContentDict
     | ToolResultContentDict
     | ImageContentDict
+    | CompactionContentDict
 )
 
 
@@ -405,6 +413,40 @@ class ThinkingContent:
 
 
 @dataclass(frozen=True)
+class CompactionContent:
+    """Codex compaction checkpoint emitted by the ``/responses/compact`` endpoint.
+
+    The server returns this as part of the compacted history; ``encrypted_content``
+    is opaque server-side state that must be replayed on the next ``/responses``
+    request to preserve the compaction. Mirrors codex-rs's
+    ``ResponseItem::Compaction { encrypted_content }``.
+
+    Wire form ``{"type": "compaction", "encrypted_content": "..."}`` (snake_case
+    rename from the Rust enum); the server also emits the legacy alias
+    ``"compaction_summary"``, which we accept on parse.
+    """
+
+    #: Wire-format ``type`` tags accepted on parse / emitted on serialize.
+    #: First entry is canonical; remainder are legacy aliases.
+    WIRE_TYPES: ClassVar[tuple[str, ...]] = ("compaction", "compaction_summary")
+
+    encrypted_content: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.encrypted_content, str):
+            raise TypeError(
+                f"encrypted_content must be str, got {type(self.encrypted_content).__name__}"
+            )
+
+    def to_dict(self) -> CompactionContentDict:
+        return {"type": "compaction", "encrypted_content": self.encrypted_content}
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, object]) -> "CompactionContent":
+        return cls(encrypted_content=str(data.get("encrypted_content", "")))
+
+
+@dataclass(frozen=True)
 class ToolUseContent:
     """Tool invocation content block."""
 
@@ -528,7 +570,12 @@ class ToolResultContent:
 # Sum type for content blocks (algebraic data type)
 # Use class-based pattern matching: match block: case TextContent(): ...
 ContentBlock = (
-    TextContent | ThinkingContent | ToolUseContent | ToolResultContent | ImageContent
+    TextContent
+    | ThinkingContent
+    | ToolUseContent
+    | ToolResultContent
+    | ImageContent
+    | CompactionContent
 )
 
 
@@ -848,6 +895,9 @@ def parse_content_block(raw: object) -> "ContentBlock | None":
     if block_type == "image":
         return ImageContent.from_dict(raw)
 
+    if block_type in CompactionContent.WIRE_TYPES:
+        return CompactionContent.from_dict(raw)
+
     return None
 
 
@@ -982,7 +1032,7 @@ class Usage:
     cached_tokens: int = 0
     total_tokens: int = 0
 
-    def to_dict(self) -> dict[str, int]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "input_tokens": self.input_tokens,
             "output_tokens": self.output_tokens,
@@ -1070,6 +1120,9 @@ class Response:
                 "cache_creation_input_tokens", 0
             ),
             cache_read_input_tokens=usage_data.get("cache_read_input_tokens", 0),
+            reasoning_tokens=usage_data.get("reasoning_tokens", 0),
+            cached_tokens=usage_data.get("cached_tokens", 0),
+            total_tokens=usage_data.get("total_tokens", 0),
         )
 
         stop_reason = data.get("stop_reason")

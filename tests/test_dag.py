@@ -191,6 +191,25 @@ class TestDAGEdgeCases:
         assert "heads=1" in repr_str
         assert "tools=1" in repr_str
 
+    def test_deep_chain_does_not_recurse(self) -> None:
+        """Long linear chains must not blow Python's recursion limit.
+
+        Why: a real Slack session with ~981 sequential nodes hit
+        ``RecursionError: maximum recursion depth exceeded`` because
+        ``Node.ancestors`` was implemented recursively.
+        """
+        import sys
+
+        depth = sys.getrecursionlimit() * 3
+        dag = DAG().system("Test")
+        for i in range(depth):
+            dag = dag.user(f"u{i}").assistant(f"a{i}")
+
+        ancestors = dag.head.ancestors()
+        assert len(ancestors) == 2 * depth + 1
+        messages = dag.to_messages()
+        assert len(messages) == 2 * depth
+
 
 class TestDAGIntegration:
     """Test DAG integration with ClaudeAPI."""

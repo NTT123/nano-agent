@@ -27,7 +27,12 @@ from nano_agent.data_structures import (
 from nano_agent.executor import maybe_auto_compact
 from nano_agent.providers.base import APIError, APIProtocol
 
-from .bot_state import BotState, serialize_content_blocks, serialize_text_contents
+from .bot_state import (
+    BotState,
+    serialize_content_blocks,
+    serialize_text_contents,
+    truncate,
+)
 
 
 @dataclass
@@ -138,7 +143,20 @@ async def agent_loop(
             total_usage[
                 "cache_read_input_tokens"
             ] += response.usage.cache_read_input_tokens
+            total_usage["cached_tokens"] += response.usage.cached_tokens
+            total_usage["reasoning_tokens"] += response.usage.reasoning_tokens
             stats.stop_reason = response.stop_reason or "unknown"
+
+            cached = (
+                response.usage.cached_tokens or response.usage.cache_read_input_tokens
+            )
+            print(
+                f"[TURN] stop={stats.stop_reason} "
+                f"in={response.usage.input_tokens} "
+                f"out={response.usage.output_tokens} "
+                f"cached={cached} reasoning={response.usage.reasoning_tokens} "
+                f"total={response.usage.total_tokens}"
+            )
 
             # Check for tool calls
             tool_calls = response.get_tool_use()
@@ -162,7 +180,8 @@ async def agent_loop(
             queue_end_turn_no_tool_count = 0
 
             stats.tool_calls += len(tool_calls)
-            print(f"[TOOLS] {[c.name for c in tool_calls]}")
+            for c in tool_calls:
+                print(f"[CALL] {c.name} {truncate(str(c.input), 200)}")
             state.append_internal_log(
                 channel_id,
                 "tool_calls",
@@ -211,6 +230,10 @@ async def agent_loop(
                                 "result": [error_result.text],
                             },
                         )
+                        print(
+                            f"[RESULT] {call.name} ERROR "
+                            f"{truncate(error_result.text, 200)}"
+                        )
                         continue
 
                     current_context = ExecutionContext(
@@ -253,6 +276,10 @@ async def agent_loop(
                                 "result": [error_result.text],
                             },
                         )
+                        print(
+                            f"[RESULT] {call.name} ERROR "
+                            f"{truncate(error_result.text, 200)}"
+                        )
                         continue
 
                     result = tool_result.content
@@ -278,6 +305,7 @@ async def agent_loop(
                         ToolResultContent(tool_use_id=call.id, content=result_list)
                     )
 
+                    texts = serialize_text_contents(result_list)
                     state.append_internal_log(
                         channel_id,
                         "tool_result",
@@ -285,8 +313,14 @@ async def agent_loop(
                             "tool_name": call.name,
                             "tool_use_id": call.id,
                             "is_error": False,
-                            "result": serialize_text_contents(result_list),
+                            "result": texts,
                         },
+                    )
+                    # Truncate the first text only — tool results can be 100KB+,
+                    # and joining them all just to keep the leading 200 chars is
+                    # wasted work on the per-call hot path.
+                    print(
+                        f"[RESULT] {call.name} {truncate(texts[0] if texts else '', 200)}"
                     )
 
             # Merge tool results back into DAG

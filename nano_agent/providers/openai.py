@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import uuid
 from collections.abc import Sequence
 from typing import Any
 
@@ -22,9 +24,24 @@ from ..data_structures import (
     Usage,
 )
 from ..tools import Tool
-from .base import responses_tool_result_item, responses_user_image_item
+from .base import (
+    DEFAULT_STREAM_IDLE_TIMEOUT,
+    ReasoningEffort,
+    ReasoningSummary,
+    build_httpx_timeout,
+    build_reasoning_block,
+    consume_responses_sse_stream,
+    force_required_all,
+    parse_tool_arguments,
+    responses_tool_result_item,
+    responses_user_image_item,
+    serialize_tool_arguments,
+    unpack_dag_or_args,
+)
 
 __all__ = ["OpenAIAPI"]
+
+_OPENAI_API_SOURCE = "OpenAI API"
 
 
 class OpenAIAPI:
@@ -41,8 +58,11 @@ class OpenAIAPI:
         max_tokens: int = 4096,
         temperature: float = 1.0,
         reasoning: bool = True,
+        reasoning_effort: ReasoningEffort = "high",
+        reasoning_summary: ReasoningSummary | None = None,
         parallel_tool_calls: bool = True,
         base_url: str = "https://api.openai.com/v1/responses",
+        stream_idle_timeout: float = DEFAULT_STREAM_IDLE_TIMEOUT,
     ):
         """Initialize OpenAI API client.
 
@@ -52,8 +72,15 @@ class OpenAIAPI:
             max_tokens: Maximum tokens in response
             temperature: Temperature setting
             reasoning: Enable reasoning/thinking mode
+            reasoning_effort: ``low``/``medium``/``high`` — passed through to
+                the model when ``reasoning`` is enabled.
+            reasoning_summary: ``concise``/``detailed``/``auto`` or ``None``.
+                Defaults to ``None`` because ``"auto"`` requires organization
+                verification on the public API; opt in explicitly.
             parallel_tool_calls: Allow model to call multiple tools in one turn
             base_url: API base URL
+            stream_idle_timeout: Per-chunk read timeout for the SSE stream.
+                Defaults to 300s to match codex-rs.
         """
         self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
         if not self.api_key:
@@ -65,11 +92,17 @@ class OpenAIAPI:
         self.max_tokens = max_tokens
         self.temperature = temperature
         self.reasoning = reasoning
+        self.reasoning_effort = reasoning_effort
+        self.reasoning_summary = reasoning_summary
         self.parallel_tool_calls = parallel_tool_calls
         self.base_url = base_url
-
-        # Create reusable HTTP client for connection pooling
-        self._client = httpx.AsyncClient()
+        self.stream_idle_timeout = stream_idle_timeout
+        self._client = httpx.AsyncClient(
+            timeout=build_httpx_timeout(stream_idle_timeout)
+        )
+        # Stable cache key for the lifetime of this client; mirrors codex-rs's
+        # use of conversation_id so prefix caching has a consistent bucket.
+        self._session_id = str(uuid.uuid4())
 
     def __repr__(self) -> str:
         """Return a clean representation of the API client configuration."""
@@ -120,8 +153,10 @@ class OpenAIAPI:
                 if isinstance(block, TextContent):
                     text_parts.append(block.text)
                 elif isinstance(block, ThinkingContent):
-                    # Only include reasoning blocks if explicitly enabled
-                    if include_reasoning:
+                    # Only replay reasoning blocks that have encrypted_content
+                    # (Responses API form). Skip Claude-style ``thinking`` blocks
+                    # since the Responses API rejects that shape.
+                    if include_reasoning and block.encrypted_content:
                         # Flush any accumulated text first
                         if text_parts:
                             items.append(
@@ -155,7 +190,7 @@ class OpenAIAPI:
                         "type": "function_call",
                         "call_id": block.id,
                         "name": block.name,
-                        "arguments": _serialize_arguments(block.input),
+                        "arguments": serialize_tool_arguments(block.input),
                     }
                     # Include item_id if present (required for OpenAI multi-turn)
                     if block.item_id:
@@ -190,13 +225,20 @@ class OpenAIAPI:
         """Convert a Tool to OpenAI function format.
 
         OpenAI uses: {"type": "function", "name": ..., "description": ..., "parameters": ..., "strict": true}
+
+        Strict mode requires every property to also appear in ``required``,
+        so we rewrite the schema when ``strict`` is True.
         """
+        strict = bool(getattr(tool, "strict", True))
+        parameters = tool.input_schema
+        if strict and isinstance(parameters, dict):
+            parameters = force_required_all(parameters)
         return {
             "type": "function",
             "name": tool.name,
             "description": tool.description,
-            "parameters": tool.input_schema,
-            "strict": True,
+            "parameters": parameters,
+            "strict": strict,
         }
 
     def _parse_response(self, data: dict[str, Any]) -> Response:
@@ -245,7 +287,7 @@ class OpenAIAPI:
                     ToolUseContent(
                         id=item.get("call_id", ""),
                         name=item.get("name", ""),
-                        input=_parse_arguments(item.get("arguments", "{}")),
+                        input=parse_tool_arguments(item.get("arguments", "{}")),
                         item_id=item.get("id"),  # Store OpenAI item id (fc_...)
                     )
                 )
@@ -295,18 +337,9 @@ class OpenAIAPI:
         Returns:
             Response object
         """
-        # Type dispatch
-        if isinstance(messages, DAG):
-            dag = messages
-            actual_messages = dag.to_messages()
-            actual_tools: list[Tool] = list(dag._tools or [])
-            dag_system_prompts = dag.head.get_system_prompts() if dag._heads else []
-
-            messages = actual_messages
-            tools = actual_tools if actual_tools else None
-
-            if dag_system_prompts:
-                system_prompt = "\n\n".join(dag_system_prompts)
+        messages, tools, system_prompt = unpack_dag_or_args(
+            messages, tools, system_prompt
+        )
 
         # Put system prompt as developer message in input for caching support.
         # The `instructions` parameter does not participate in OpenAI prefix
@@ -331,62 +364,78 @@ class OpenAIAPI:
             "max_output_tokens": self.max_tokens,
             "temperature": self.temperature,
             "store": False,
+            "stream": True,
+            "prompt_cache_key": self._session_id,
         }
 
-        # Add reasoning if enabled (for o3, o3-mini, etc.)
-        # Note: 'summary': 'auto' requires organization verification
         if self.reasoning:
-            request_body["reasoning"] = {}
-            # Include encrypted_content for multi-turn reasoning
+            request_body["reasoning"] = build_reasoning_block(
+                self.reasoning_effort, self.reasoning_summary
+            )
             request_body["include"] = ["reasoning.encrypted_content"]
 
         # Add tools if provided
         if tools:
             request_body["tools"] = [self._convert_tool_to_openai(t) for t in tools]
+            request_body["tool_choice"] = "auto"
             request_body["parallel_tool_calls"] = self.parallel_tool_calls
         else:
             request_body["tools"] = []
 
-        response = await self._client.post(
+        response_data = await self._stream_response(request_body)
+        if response_data is None:
+            raise RuntimeError("No response received from OpenAI endpoint.")
+        return self._parse_response(response_data)
+
+    async def _stream_response(
+        self, request_body: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+            "Accept": "text/event-stream",
+        }
+        async with self._client.stream(
+            "POST",
             self.base_url,
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
+            headers=headers,
             json=request_body,
-        )
+        ) as resp:
+            if resp.status_code != 200:
+                body = await resp.aread()
+                _raise_openai_http_error(resp.status_code, body)
 
-        response_json = response.json()
-
-        # Check for errors (error key exists and is not None)
-        error = response_json.get("error")
-        if error is not None:
-            if isinstance(error, dict):
-                raise RuntimeError(f"OpenAI API error: {error.get('message', error)}")
-            else:
-                raise RuntimeError(f"OpenAI API error: {error}")
-
-        return self._parse_response(response_json)
-
-
-def _serialize_arguments(input_dict: dict[str, Any] | None) -> str:
-    """Serialize tool input to JSON string for OpenAI."""
-    import json
-
-    if input_dict is None:
-        return "{}"
-    return json.dumps(input_dict)
+            last_response, last_event_type = await consume_responses_sse_stream(
+                resp.aiter_lines(), source=_OPENAI_API_SOURCE
+            )
+            if last_response is None and last_event_type:
+                raise RuntimeError(
+                    f"No response received from OpenAI endpoint (last event: {last_event_type})."
+                )
+        return last_response
 
 
-def _parse_arguments(arguments: str) -> dict[str, Any]:
-    """Parse OpenAI function arguments JSON string to dict."""
-    import json
+def _raise_openai_http_error(status_code: int, body: bytes) -> None:
+    """Raise ``RuntimeError`` for an OpenAI HTTP error response.
 
+    Tries to extract ``error.message`` from a JSON body; falls back to a
+    snippet of the raw response so transport-level failures are still
+    diagnosable.
+    """
     try:
-        result = json.loads(arguments)
-        return result if isinstance(result, dict) else {}
+        payload = json.loads(body)
     except json.JSONDecodeError:
-        return {}
+        snippet = body.decode("utf-8", errors="ignore")[:400]
+        raise RuntimeError(
+            f"OpenAI API HTTP {status_code}: {snippet or 'empty response'}"
+        )
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict):
+            raise RuntimeError(f"OpenAI API error: {error.get('message', error)}")
+        if error is not None:
+            raise RuntimeError(f"OpenAI API error: {error}")
+    raise RuntimeError(f"OpenAI API HTTP {status_code}: {payload!r}")
 
 
 def _map_status_to_stop_reason(status: str) -> str | None:

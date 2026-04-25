@@ -33,6 +33,11 @@ def utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def format_user_mention(user_id: str) -> str:
+    """Slack and Discord both render `<@id>` as a clickable user mention."""
+    return f"<@{user_id}>"
+
+
 def chunk_message(text: str, limit: int = 2000) -> list[str]:
     """Split text into chunks with a hard max length, preferring line breaks."""
     if len(text) <= limit:
@@ -130,6 +135,9 @@ class BotState:
     # reloading persisted sessions so Slack sessions don't come back with
     # Discord tools attached (or vice versa).
     tools_factory: Callable[[], list[Tool]] | None = None
+    # Lazy in-memory mirror of channel_<id> dirs under state_root. Populated
+    # on first read; we keep it in sync via _ensure_state_dir below.
+    _persisted_channel_ids: set[str] | None = None
 
     # -- path helpers --
 
@@ -147,6 +155,8 @@ class BotState:
 
     def _ensure_state_dir(self, channel_id: str) -> None:
         self._channel_state_dir(channel_id).mkdir(parents=True, exist_ok=True)
+        if self._persisted_channel_ids is not None:
+            self._persisted_channel_ids.add(channel_id)
 
     # -- session management --
 
@@ -171,6 +181,18 @@ class BotState:
     def set_session(self, channel_id: str, dag: DAG) -> None:
         self.sessions[channel_id] = dag
         self._save_session(channel_id, dag)
+
+    def create_session_from_factory(
+        self, cwd: str | None = None, system_prompt: str = ""
+    ) -> DAG:
+        """Create a session using ``tools_factory`` for the tool list.
+
+        Frontends set ``tools_factory`` to a platform-specific lambda; this
+        helper threads it through to ``create_session`` so callers don't have
+        to repeat the ``factory() if factory else None`` boilerplate.
+        """
+        tools = self.tools_factory() if self.tools_factory else None
+        return self.create_session(cwd, system_prompt=system_prompt, tools=tools)
 
     def create_session(
         self,
@@ -421,21 +443,37 @@ class BotState:
         )
         return queue
 
+    def _persisted_channel_id_set(self) -> set[str]:
+        """In-memory mirror of ``state_root/channel_<id>`` directories.
+
+        First call scans the directory; later calls return the cached set,
+        which ``_ensure_state_dir`` keeps in sync as new sessions are
+        created. Hot path for Slack thread-message routing.
+        """
+        cached = self._persisted_channel_ids
+        if cached is not None:
+            return cached
+        ids: set[str] = set()
+        if self.state_root.exists():
+            for entry in self.state_root.iterdir():
+                if not entry.is_dir():
+                    continue
+                name = entry.name
+                if not name.startswith("channel_"):
+                    continue
+                raw = name.removeprefix("channel_")
+                if raw:
+                    ids.add(raw)
+        self._persisted_channel_ids = ids
+        return ids
+
     def persisted_channel_ids(self) -> list[str]:
         """Return channel IDs discovered from persisted queue directories."""
-        if not self.state_root.exists():
-            return []
-        ids: list[str] = []
-        for entry in self.state_root.iterdir():
-            if not entry.is_dir():
-                continue
-            name = entry.name
-            if not name.startswith("channel_"):
-                continue
-            raw = name.removeprefix("channel_")
-            if raw:
-                ids.append(raw)
-        return ids
+        return list(self._persisted_channel_id_set())
+
+    def is_persisted_channel(self, channel_id: str) -> bool:
+        """O(1) membership check for the persisted channel set."""
+        return channel_id in self._persisted_channel_id_set()
 
     # -- logging --
 

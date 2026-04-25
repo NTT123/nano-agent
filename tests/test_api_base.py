@@ -8,7 +8,95 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
-from nano_agent.providers.base import APIClientMixin, APIError
+from nano_agent.providers.base import (
+    APPROX_BYTES_PER_TOKEN,
+    APIClientMixin,
+    APIError,
+    ContextWindowExceededError,
+    approx_token_count,
+    is_context_window_error_payload,
+    parse_tool_arguments,
+    serialize_tool_arguments,
+)
+
+
+class TestSerializeToolArguments:
+    def test_none_returns_empty_object(self) -> None:
+        assert serialize_tool_arguments(None) == "{}"
+
+    def test_dict_serializes_to_json(self) -> None:
+        result = serialize_tool_arguments({"key": "value", "num": 42})
+        assert '"key"' in result
+        assert '"value"' in result
+        assert "42" in result
+
+
+class TestParseToolArguments:
+    def test_valid_json(self) -> None:
+        assert parse_tool_arguments('{"key": "value"}') == {"key": "value"}
+
+    def test_invalid_json_returns_empty(self) -> None:
+        assert parse_tool_arguments("not json") == {}
+
+    def test_non_dict_returns_empty(self) -> None:
+        assert parse_tool_arguments('"string"') == {}
+
+
+class TestIsContextWindowErrorPayload:
+    """Mirrors codex-rs ``is_context_window_error`` (codex-api/src/sse/responses.rs)."""
+
+    def test_detects_context_length_exceeded_code(self) -> None:
+        assert is_context_window_error_payload(
+            {"code": "context_length_exceeded", "message": "too big"}
+        )
+
+    def test_does_not_match_other_codes(self) -> None:
+        assert not is_context_window_error_payload(
+            {"code": "rate_limit_exceeded", "message": "slow down"}
+        )
+
+    def test_does_not_match_when_code_missing(self) -> None:
+        assert not is_context_window_error_payload({"message": "no code field"})
+
+    def test_does_not_match_non_dict(self) -> None:
+        assert not is_context_window_error_payload("just a string")
+        assert not is_context_window_error_payload(None)
+
+
+class TestContextWindowExceededError:
+    def test_is_an_apierror(self) -> None:
+        err = ContextWindowExceededError("too big", provider="Codex API")
+        assert isinstance(err, APIError)
+        assert err.status_code == 400
+        assert err.error_type == "context_length_exceeded"
+        assert err.provider == "Codex API"
+        assert "too big" in str(err)
+
+
+class TestApproxTokenCount:
+    """Mirrors codex-rs's ``approx_token_count`` (utils/string/src/truncate.rs)."""
+
+    def test_empty_string_is_zero_tokens(self) -> None:
+        assert approx_token_count("") == 0
+
+    def test_one_byte_rounds_up_to_one_token(self) -> None:
+        assert approx_token_count("a") == 1
+
+    def test_four_bytes_is_one_token(self) -> None:
+        assert approx_token_count("abcd") == 1
+
+    def test_five_bytes_rounds_up_to_two_tokens(self) -> None:
+        assert approx_token_count("abcde") == 2
+
+    def test_uses_utf8_byte_length_not_codepoints(self) -> None:
+        # "é" is 2 bytes in UTF-8; with 4-bytes/token ceiling division this
+        # is 1 token. Confirms we count bytes, not Python characters.
+        assert approx_token_count("é") == 1
+        # Four 2-byte chars = 8 bytes = 2 tokens.
+        assert approx_token_count("éééé") == 2
+
+    def test_byte_per_token_constant(self) -> None:
+        assert APPROX_BYTES_PER_TOKEN == 4
 
 
 class TestAPIError:

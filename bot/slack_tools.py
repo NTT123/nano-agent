@@ -27,11 +27,12 @@ from urllib.parse import urlparse
 import httpx
 from slack_sdk.web.async_client import AsyncWebClient
 
-from nano_agent import ExecutionContext, TextContent, get_default_tools
+from nano_agent import ExecutionContext, TextContent, get_codex_tools, get_default_tools
 from nano_agent.tools.base import Desc, Tool, ToolResult
 
 from .bot_introspect import InspectBotStateTool
-from .bot_state import BotState, chunk_message
+from .bot_skills import get_bot_skill_tools
+from .bot_state import BotState, chunk_message, format_user_mention
 from .bot_tools import (
     ClearContextTool,
     DequeueUserMessagesTool,
@@ -72,6 +73,37 @@ class SlackContext:
 def composite_channel_key(channel_id: str, thread_ts: str | None) -> str:
     """Queue/session key used by BotState for Slack contexts."""
     return f"{channel_id}:{thread_ts}" if thread_ts else channel_id
+
+
+def is_slack_dm_channel(channel_id: str | None, channel_type: str | None) -> bool:
+    """Return whether a Slack event belongs to a 1:1 direct message."""
+    return channel_type == "im" or str(channel_id or "").startswith("D")
+
+
+def slack_text_mentions_user(text: str | None, user_id: str | None) -> bool:
+    """Return whether Slack raw message text contains a direct user mention."""
+    if not user_id:
+        return False
+    return format_user_mention(user_id) in (text or "")
+
+
+def resolve_slack_thread_ts(
+    channel_id: str | None,
+    channel_type: str | None,
+    message_ts: str | None,
+    event_thread_ts: str | None,
+) -> str | None:
+    """Choose the Slack thread for an inbound message.
+
+    Normal DM messages stay in the DM. Existing thread replies preserve their
+    ``thread_ts``. Top-level channel/group messages use their message timestamp
+    so replies stay tidy.
+    """
+    if event_thread_ts:
+        return str(event_thread_ts)
+    if is_slack_dm_channel(channel_id, channel_type):
+        return None
+    return str(message_ts) if message_ts else None
 
 
 # --- Tool input dataclasses ---
@@ -254,7 +286,7 @@ class SlackSendFileTool(Tool):
             return ToolResult(content=TextContent(text=f"Error sending file: {e}"))
 
         size = os.path.getsize(path)
-        file_id = (resp.get("file") or {}).get("id") if isinstance(resp, dict) else None
+        file_id = (resp.get("file") or {}).get("id")
         return ToolResult(
             content=TextContent(
                 text=f"File uploaded: {os.path.basename(path)} ({size} bytes) id={file_id}"
@@ -272,6 +304,7 @@ class SlackCreateThreadTool(Tool):
     )
     state: BotState = field(default_factory=BotState, repr=False)
     client: AsyncWebClient | None = field(default=None, repr=False)
+    system_prompt: str = field(default="", repr=False)
 
     async def __call__(
         self,
@@ -284,42 +317,55 @@ class SlackCreateThreadTool(Tool):
                 content=TextContent(text="Error: No active Slack channel")
             )
 
+        topic = input.topic.strip() or "New conversation"
+        active_key = self.state.active_channel_id
+        user_id = (
+            self.state.channel_last_user_id.get(active_key) if active_key else None
+        )
         # Post a top-level message in the parent channel (not in the current
-        # thread) to start a fresh thread.
+        # thread) to start a fresh thread. Slack only displays a thread once a
+        # reply exists, so always add a kickoff reply below.
         try:
             parent = await self.client.chat_postMessage(
                 channel=ctx.channel_id,
-                text=f"*{input.topic}*",
+                text=f"*{topic}*",
             )
         except Exception as e:
             return ToolResult(content=TextContent(text=f"Error creating thread: {e}"))
 
-        new_ts = parent.get("ts") if isinstance(parent, dict) else None
+        new_ts = parent.get("ts")
         if not new_ts:
             return ToolResult(
                 content=TextContent(text=f"Thread creation returned no ts: {parent!r}")
             )
 
-        if input.message:
-            try:
-                await self.client.chat_postMessage(
-                    channel=ctx.channel_id,
-                    text=input.message,
-                    thread_ts=new_ts,
+        body = input.message.strip() or "Thread ready. Reply here to continue."
+        initial = f"{format_user_mention(user_id)} {body}" if user_id else body
+        try:
+            await self.client.chat_postMessage(
+                channel=ctx.channel_id,
+                text=initial,
+                thread_ts=new_ts,
+            )
+        except Exception as e:
+            return ToolResult(
+                content=TextContent(
+                    text=f"Thread opened but failed to post first message: {e}"
                 )
-            except Exception as e:
-                return ToolResult(
-                    content=TextContent(
-                        text=f"Thread opened but failed to post first message: {e}"
-                    )
-                )
+            )
 
         new_key = composite_channel_key(ctx.channel_id, new_ts)
-        self.state.sessions[new_key] = self.state.create_session()
+        cwd = self.state.working_dirs.get(user_id) if user_id is not None else None
+        if user_id is not None:
+            self.state.channel_last_user_id[new_key] = user_id
+        self.state.set_session(
+            new_key,
+            self.state.create_session_from_factory(cwd, self.system_prompt),
+        )
         return ToolResult(
             content=TextContent(
                 text=f"Thread started in channel {ctx.channel_id} (thread_ts={new_ts}). "
-                "The user can reply in the thread to continue the conversation."
+                "The user was tagged and can reply in the thread to continue."
             )
         )
 
@@ -608,8 +654,8 @@ class SlackDownloadFileTool(Tool):
     description: str = (
         "Download a user-uploaded file from Slack to the local filesystem. "
         "Slack's url_private URLs require the bot token; use this tool instead "
-        "of WebFetch or curl. After downloading, use Read (for text) or other "
-        "tools to inspect the content. Requires the files:read scope."
+        "of WebFetch or curl. After downloading, inspect the saved file with "
+        "your usual file-reading tools. Requires the files:read scope."
     )
     state: BotState = field(default_factory=BotState, repr=False)
     client: AsyncWebClient | None = field(default=None, repr=False)
@@ -680,18 +726,37 @@ class SlackDownloadFileTool(Tool):
         return ToolResult(content=TextContent(text=json.dumps(payload, indent=2)))
 
 
-def get_slack_tools(state: BotState, client: AsyncWebClient) -> list[Tool]:
-    """Slack tool set: default tools + Slack-specific tools + shared queue tools."""
-    tools: list[Tool] = [t for t in get_default_tools() if t.name != "AskUserQuestion"]
+def get_slack_tools(
+    state: BotState,
+    client: AsyncWebClient,
+    *,
+    system_prompt: str = "",
+    use_codex_tools: bool = False,
+) -> list[Tool]:
+    """Slack tool set: base tools + Slack-specific tools + shared queue tools.
+
+    When ``use_codex_tools`` is True, the base set is the codex-style tool
+    suite (``apply_patch``, ``exec_command``/``write_stdin``, ``view_image``)
+    instead of the Claude-flavored Read/Glob/Grep/Edit/Write defaults.
+    """
+    base_tools = get_codex_tools() if use_codex_tools else get_default_tools()
+    tools: list[Tool] = [t for t in base_tools if t.name != "AskUserQuestion"]
     tools.append(SlackSendUserMessageTool(state=state, client=client))
     tools.append(PeekQueuedUserMessagesTool(state=state))
     tools.append(DequeueUserMessagesTool(state=state))
     tools.append(SlackSendFileTool(state=state, client=client))
-    tools.append(SlackCreateThreadTool(state=state, client=client))
+    tools.append(
+        SlackCreateThreadTool(
+            state=state,
+            client=client,
+            system_prompt=system_prompt,
+        )
+    )
     tools.append(ExploreSlackTool(state=state, client=client))
     tools.append(SlackAPITool(state=state, client=client))
     tools.append(ClearContextTool(state=state))
     tools.append(SlackRestartBotTool(state=state, client=client))
     tools.append(SlackDownloadFileTool(state=state, client=client))
     tools.append(InspectBotStateTool(state=state))
+    tools.extend(get_bot_skill_tools())
     return tools

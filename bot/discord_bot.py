@@ -11,6 +11,7 @@ Usage:
     3. uv run nano-discord-bot
 """
 
+import asyncio
 import json
 import os
 import sys
@@ -24,7 +25,13 @@ from nano_agent import DAG
 from nano_agent.providers.base import APIProtocol
 
 from .bot_agent import ensure_channel_worker
-from .bot_config import async_renew_oauth, build_api_from_env
+from .bot_config import (
+    async_renew_oauth,
+    build_api_from_env,
+    get_bot_provider,
+    maybe_discover_context_window,
+)
+from .bot_skills import DOWNLOAD_SKILL_PROMPT_SENTENCE
 from .bot_state import BotState, chunk_message, truncate
 from .bot_tools import build_discord_explore_payload, get_discord_tools
 
@@ -49,7 +56,8 @@ SYSTEM_PROMPT = (
     "Keep responses concise — Discord has a 2000 character message limit, "
     "so long responses will be split across multiple messages. "
     "Discord does NOT support markdown tables. For tabular data, "
-    "use code blocks (```text) with monospace-aligned columns instead."
+    "use code blocks (```text) with monospace-aligned columns instead. "
+    + DOWNLOAD_SKILL_PROMPT_SENTENCE
 )
 
 RESPOND_TO_ALL_MESSAGES = os.getenv(
@@ -71,16 +79,19 @@ BOT_PERMISSIONS = discord.Permissions(
 bot = discord.Client(intents=intents)
 tree = app_commands.CommandTree(bot)
 
+_USE_CODEX_TOOLS = get_bot_provider() == "codex"
+
 api: APIProtocol = build_api_from_env()
 state = BotState(bot=bot)
-state.tools_factory = lambda: get_discord_tools(state)
+state.tools_factory = lambda: get_discord_tools(
+    state,
+    system_prompt=SYSTEM_PROMPT,
+    use_codex_tools=_USE_CODEX_TOOLS,
+)
 
 
 def _create_session(cwd: str | None = None) -> DAG:
-    """Helper that wires SYSTEM_PROMPT and tools into state.create_session."""
-    return state.create_session(
-        cwd, system_prompt=SYSTEM_PROMPT, tools=get_discord_tools(state)
-    )
+    return state.create_session_from_factory(cwd, system_prompt=SYSTEM_PROMPT)
 
 
 # --- Startup helpers ---
@@ -119,11 +130,18 @@ async def recover_pending_queues() -> None:
 @bot.event
 async def on_ready() -> None:
     print(f"[READY] Logged in as {bot.user}. Syncing slash commands...")
+    discover_task = asyncio.create_task(maybe_discover_context_window(api))
     try:
         synced = await tree.sync()
         print(f"[READY] Synced {len(synced)} slash commands.")
     except Exception as e:
         print(f"[READY] Slash command sync failed: {e}")
+    await discover_task
+    print(
+        f"[READY] model={getattr(api, 'model', None)} "
+        f"reasoning_effort={getattr(api, 'reasoning_effort', None)} "
+        f"context_window={getattr(api, 'context_window', None)}"
+    )
     await recover_pending_queues()
 
 
@@ -255,6 +273,7 @@ async def renew_command(interaction: discord.Interaction) -> None:
         await async_renew_oauth()
         global api
         api = build_api_from_env()
+        await maybe_discover_context_window(api)
         state.delete_all_session_files()
         state.sessions.clear()
         await interaction.followup.send("OAuth token refreshed successfully.")

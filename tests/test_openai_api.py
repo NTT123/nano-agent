@@ -1,7 +1,8 @@
 """Tests for OpenAI API client."""
 
-from typing import Any
-from unittest.mock import AsyncMock, Mock, patch
+import json
+from typing import Any, ClassVar
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -11,6 +12,7 @@ from nano_agent import (
     Response,
     Role,
     TextContent,
+    ThinkingContent,
     ToolResultContent,
     ToolUseContent,
     Usage,
@@ -18,44 +20,25 @@ from nano_agent import (
 from nano_agent.providers.openai import (
     OpenAIAPI,
     _map_status_to_stop_reason,
-    _parse_arguments,
-    _serialize_arguments,
+    _raise_openai_http_error,
 )
 from nano_agent.tools import Tool
 
 
-class TestHelperFunctions:
-    def test_serialize_arguments_none(self) -> None:
-        assert _serialize_arguments(None) == "{}"
-
-    def test_serialize_arguments_dict(self) -> None:
-        result = _serialize_arguments({"key": "value", "num": 42})
-        assert '"key"' in result
-        assert '"value"' in result
-        assert "42" in result
-
-    def test_parse_arguments_valid_json(self) -> None:
-        assert _parse_arguments('{"key": "value"}') == {"key": "value"}
-
-    def test_parse_arguments_invalid_json(self) -> None:
-        assert _parse_arguments("not json") == {}
-
-    def test_parse_arguments_non_dict(self) -> None:
-        assert _parse_arguments('"string"') == {}
-
-    def test_map_status_completed(self) -> None:
+class TestMapStatusToStopReason:
+    def test_completed(self) -> None:
         assert _map_status_to_stop_reason("completed") == "end_turn"
 
-    def test_map_status_failed(self) -> None:
+    def test_failed(self) -> None:
         assert _map_status_to_stop_reason("failed") == "error"
 
-    def test_map_status_incomplete(self) -> None:
+    def test_incomplete(self) -> None:
         assert _map_status_to_stop_reason("incomplete") == "max_tokens"
 
-    def test_map_status_in_progress(self) -> None:
+    def test_in_progress(self) -> None:
         assert _map_status_to_stop_reason("in_progress") is None
 
-    def test_map_status_unknown(self) -> None:
+    def test_unknown(self) -> None:
         assert _map_status_to_stop_reason("unknown_status") == "unknown_status"
 
 
@@ -186,6 +169,46 @@ class TestMessageConversion:
         assert items[0]["call_id"] == "call_123"
         assert items[0]["output"] == "72F and sunny"
 
+    def test_convert_drops_reasoning_without_encrypted_content(self) -> None:
+        """Claude-style ``thinking`` blocks lack encrypted_content and would
+        produce an invalid Responses-API item; they must be skipped even when
+        ``include_reasoning=True``."""
+        api = OpenAIAPI(api_key="test-key")
+        msg = Message(
+            role=Role.ASSISTANT,
+            content=[
+                ThinkingContent(thinking="claude-style", signature="sig"),
+                TextContent(text="answer"),
+            ],
+        )
+        items = api._convert_message_to_openai(msg, include_reasoning=True)
+
+        assert all(item.get("type") != "thinking" for item in items)
+        assert all(item.get("type") != "reasoning" for item in items)
+
+    def test_convert_replays_reasoning_with_encrypted_content(self) -> None:
+        api = OpenAIAPI(api_key="test-key")
+        msg = Message(
+            role=Role.ASSISTANT,
+            content=[
+                ThinkingContent(
+                    thinking="t",
+                    id="rs_abc",
+                    encrypted_content="ENCRYPTED_BLOB",
+                    summary=({"type": "summary_text", "text": "t"},),
+                ),
+                TextContent(text="answer"),
+            ],
+        )
+        items = api._convert_message_to_openai(msg, include_reasoning=True)
+
+        assert items[0] == {
+            "type": "reasoning",
+            "id": "rs_abc",
+            "encrypted_content": "ENCRYPTED_BLOB",
+            "summary": [{"type": "summary_text", "text": "t"}],
+        }
+
 
 class TestToolConversion:
     def test_convert_tool_to_openai(self) -> None:
@@ -228,6 +251,94 @@ class TestToolConversion:
             },
             "strict": True,
         }
+
+    def test_convert_tool_to_openai_respects_non_strict_tool(self) -> None:
+        from dataclasses import dataclass
+        from typing import Annotated
+
+        from nano_agent import TextContent
+        from nano_agent.tools import Desc
+
+        @dataclass
+        class SearchInput:
+            query: Annotated[str, Desc("Search query")]
+            limit: Annotated[int, Desc("Maximum result count")] = 10
+
+        @dataclass
+        class SearchTool(Tool):
+            name: str = "search"
+            description: str = "Search"
+            strict: ClassVar[bool] = False
+
+            async def __call__(self, input: SearchInput) -> TextContent:
+                return TextContent(text=input.query)
+
+        api = OpenAIAPI(api_key="test-key")
+        result = api._convert_tool_to_openai(SearchTool())
+
+        assert result["strict"] is False
+        assert result["parameters"]["required"] == ["query"]
+
+    def test_strict_tool_promotes_default_fields_to_required(self) -> None:
+        """With strict=True (the default), every property must appear in
+        ``required`` or the OpenAI API rejects the tool."""
+        from dataclasses import dataclass
+        from typing import Annotated
+
+        from nano_agent import TextContent
+        from nano_agent.tools import Desc
+
+        @dataclass
+        class SearchInput:
+            query: Annotated[str, Desc("Search query")]
+            limit: Annotated[int, Desc("Maximum result count")] = 10
+
+        @dataclass
+        class SearchTool(Tool):
+            name: str = "search"
+            description: str = "Search"
+
+            async def __call__(self, input: SearchInput) -> TextContent:
+                return TextContent(text=input.query)
+
+        api = OpenAIAPI(api_key="test-key")
+        result = api._convert_tool_to_openai(SearchTool())
+
+        assert result["strict"] is True
+        assert sorted(result["parameters"]["required"]) == ["limit", "query"]
+        assert result["parameters"]["additionalProperties"] is False
+
+    def test_strict_rewrite_does_not_mutate_cached_input_schema(self) -> None:
+        """``Tool._inferred_schema`` is a ``ClassVar`` shared across instances;
+        the strict-mode rewrite must not mutate it or future conversions —
+        even from a different provider — would see corrupted state."""
+        from dataclasses import dataclass
+        from typing import Annotated
+
+        from nano_agent import TextContent
+        from nano_agent.tools import Desc
+
+        @dataclass
+        class FooInput:
+            x: Annotated[str, Desc("x")]
+            y: Annotated[int, Desc("y")] = 1
+
+        @dataclass
+        class FooTool(Tool):
+            name: str = "foo"
+            description: str = "foo"
+
+            async def __call__(self, input: FooInput) -> TextContent:
+                return TextContent(text="")
+
+        api = OpenAIAPI(api_key="test-key")
+        tool = FooTool()
+        before = list(tool.input_schema["required"])  # type: ignore[arg-type]
+
+        api._convert_tool_to_openai(tool)
+        api._convert_tool_to_openai(tool)
+
+        assert list(tool.input_schema["required"]) == before  # type: ignore[arg-type]
 
 
 class TestResponseParsing:
@@ -334,35 +445,30 @@ class TestResponseParsing:
 
 class TestSend:
     async def test_send_simple_message(self) -> None:
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "id": "resp_test",
-            "model": "gpt-5.2-codex",
-            "status": "completed",
-            "output": [
-                {
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": "Four"}],
-                }
-            ],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-        }
-
         api = OpenAIAPI(api_key="test-api-key")
-        api._client = AsyncMock()
-        api._client.post.return_value = mock_response
+        api._stream_response = AsyncMock(  # type: ignore[method-assign]
+            return_value={
+                "id": "resp_test",
+                "model": "gpt-5.2-codex",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "Four"}],
+                    }
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }
+        )
 
         messages = [Message(role=Role.USER, content="What is 2+2?")]
         response = await api.send(messages)
 
-        api._client.post.assert_called_once()
-        call_args = api._client.post.call_args
-
-        assert call_args[0][0] == "https://api.openai.com/v1/responses"
-        assert call_args[1]["headers"]["Authorization"] == "Bearer test-api-key"
-        assert call_args[1]["json"]["model"] == "gpt-5.2-codex"
-        assert call_args[1]["json"]["input"] == [
+        api._stream_response.assert_awaited_once()
+        request_body = api._stream_response.await_args.args[0]
+        assert request_body["model"] == "gpt-5.2-codex"
+        assert request_body["stream"] is True
+        assert request_body["input"] == [
             {
                 "role": "user",
                 "content": [{"type": "input_text", "text": "What is 2+2?"}],
@@ -372,58 +478,129 @@ class TestSend:
         assert isinstance(response, Response)
         assert response.get_text() == "Four"
 
-    async def test_send_with_system_prompt(self) -> None:
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "id": "resp_test",
-            "model": "gpt-5.2-codex",
-            "status": "completed",
-            "output": [
-                {
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": "Hello!"}],
-                }
-            ],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-        }
-
+    async def test_send_includes_stable_prompt_cache_key(self) -> None:
+        """Sending repeatedly from the same client must reuse the same
+        ``prompt_cache_key`` so OpenAI prefix caching gets a stable bucket."""
         api = OpenAIAPI(api_key="test-api-key")
-        api._client = AsyncMock()
-        api._client.post.return_value = mock_response
+        api._stream_response = AsyncMock(  # type: ignore[method-assign]
+            return_value={
+                "id": "r",
+                "model": "gpt-5.2-codex",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+
+        await api.send([Message(role=Role.USER, content="hi")])
+        await api.send([Message(role=Role.USER, content="hi again")])
+
+        first_call, second_call = api._stream_response.await_args_list
+        assert first_call.args[0]["prompt_cache_key"] == api._session_id
+        assert second_call.args[0]["prompt_cache_key"] == api._session_id
+
+    async def test_send_passes_reasoning_effort_and_summary(self) -> None:
+        api = OpenAIAPI(
+            api_key="test-api-key",
+            reasoning=True,
+            reasoning_effort="medium",
+            reasoning_summary="detailed",
+        )
+        api._stream_response = AsyncMock(  # type: ignore[method-assign]
+            return_value={
+                "id": "r",
+                "model": "gpt-5.2-codex",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "ok"}],
+                    }
+                ],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+
+        await api.send([Message(role=Role.USER, content="hi")])
+
+        request_body = api._stream_response.await_args.args[0]
+        assert request_body["reasoning"] == {
+            "effort": "medium",
+            "summary": "detailed",
+        }
+        assert request_body["include"] == ["reasoning.encrypted_content"]
+
+    async def test_send_omits_summary_by_default(self) -> None:
+        """``summary`` is only sent when explicitly opted in (``"auto"``
+        requires org verification on the public API)."""
+        api = OpenAIAPI(api_key="test-api-key", reasoning=True)
+        api._stream_response = AsyncMock(  # type: ignore[method-assign]
+            return_value={
+                "id": "r",
+                "model": "gpt-5.2-codex",
+                "status": "completed",
+                "output": [],
+                "usage": {"input_tokens": 1, "output_tokens": 1},
+            }
+        )
+
+        await api.send([Message(role=Role.USER, content="hi")])
+
+        request_body = api._stream_response.await_args.args[0]
+        assert request_body["reasoning"] == {"effort": "high"}
+
+    async def test_send_with_system_prompt(self) -> None:
+        api = OpenAIAPI(api_key="test-api-key")
+        api._stream_response = AsyncMock(  # type: ignore[method-assign]
+            return_value={
+                "id": "resp_test",
+                "model": "gpt-5.2-codex",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "Hello!"}],
+                    }
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }
+        )
 
         messages = [Message(role=Role.USER, content="Hi")]
         await api.send(messages, system_prompt="You are helpful.")
 
-        call_args = api._client.post.call_args
-        # System prompt is now in input array, not instructions
-        input_items = call_args[1]["json"]["input"]
+        request_body = api._stream_response.await_args.args[0]
+        # System prompt is in the input array as a developer message for
+        # OpenAI prompt-cache friendliness.
+        input_items = request_body["input"]
         assert input_items[0] == {
-            "role": "system",
+            "role": "developer",
             "content": [{"type": "input_text", "text": "You are helpful."}],
         }
 
     async def test_send_with_tools(self) -> None:
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "id": "resp_test",
-            "model": "gpt-5.2-codex",
-            "status": "completed",
-            "output": [
-                {
-                    "type": "function_call",
-                    "call_id": "call_123",
-                    "name": "get_weather",
-                    "arguments": '{"location": "NYC"}',
-                }
-            ],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-        }
-
         api = OpenAIAPI(api_key="test-api-key")
-        api._client = AsyncMock()
-        api._client.post.return_value = mock_response
+        api._stream_response = AsyncMock(  # type: ignore[method-assign]
+            return_value={
+                "id": "resp_test",
+                "model": "gpt-5.2-codex",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "function_call",
+                        "call_id": "call_123",
+                        "name": "get_weather",
+                        "arguments": '{"location": "NYC"}',
+                    }
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }
+        )
 
         from dataclasses import dataclass
         from typing import Annotated
@@ -447,9 +624,10 @@ class TestSend:
         tools = [GetWeatherTool()]
         response = await api.send(messages, tools=tools)
 
-        call_args = api._client.post.call_args
-        assert len(call_args[1]["json"]["tools"]) == 1
-        assert call_args[1]["json"]["tools"][0]["name"] == "get_weather"
+        request_body = api._stream_response.await_args.args[0]
+        assert len(request_body["tools"]) == 1
+        assert request_body["tools"][0]["name"] == "get_weather"
+        assert request_body["tool_choice"] == "auto"
 
         assert response.has_tool_use()
         tool_calls = response.get_tool_use()
@@ -457,33 +635,30 @@ class TestSend:
         assert tool_calls[0].name == "get_weather"
 
     async def test_send_with_dag(self) -> None:
-        mock_response = Mock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
-            "id": "resp_test",
-            "model": "gpt-5.2-codex",
-            "status": "completed",
-            "output": [
-                {
-                    "type": "message",
-                    "content": [{"type": "output_text", "text": "Hello!"}],
-                }
-            ],
-            "usage": {"input_tokens": 10, "output_tokens": 5},
-        }
-
         api = OpenAIAPI(api_key="test-api-key")
-        api._client = AsyncMock()
-        api._client.post.return_value = mock_response
+        api._stream_response = AsyncMock(  # type: ignore[method-assign]
+            return_value={
+                "id": "resp_test",
+                "model": "gpt-5.2-codex",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "Hello!"}],
+                    }
+                ],
+                "usage": {"input_tokens": 10, "output_tokens": 5},
+            }
+        )
 
         dag = DAG().system("Be helpful.").user("Hi!")
         response = await api.send(dag)
 
-        call_args = api._client.post.call_args
-        input_items = call_args[1]["json"]["input"]
-        # First item is system prompt
+        request_body = api._stream_response.await_args.args[0]
+        input_items = request_body["input"]
+        # First item is system prompt represented as a developer message.
         assert input_items[0] == {
-            "role": "system",
+            "role": "developer",
             "content": [{"type": "input_text", "text": "Be helpful."}],
         }
         # Second item is user message
@@ -493,21 +668,97 @@ class TestSend:
         }
         assert response.get_text() == "Hello!"
 
-    async def test_send_error_handling(self) -> None:
-        mock_response = Mock()
-        mock_response.status_code = 400
-        mock_response.json.return_value = {
-            "error": {"message": "Invalid API key", "type": "invalid_request_error"}
-        }
+    async def test_stream_response_assembles_streamed_output_items(self) -> None:
+        class FakeStream:
+            def __init__(self) -> None:
+                self.status_code = 200
+                self.headers = {"content-type": "text/event-stream"}
 
-        api = OpenAIAPI(api_key="invalid-key")
-        api._client = AsyncMock()
-        api._client.post.return_value = mock_response
+            async def __aenter__(self) -> "FakeStream":
+                return self
 
-        messages = [Message(role=Role.USER, content="Hi")]
+            async def __aexit__(self, *_: Any) -> None:
+                return None
 
+            async def aiter_lines(self) -> Any:
+                output_item = {
+                    "type": "response.output_item.done",
+                    "item": {
+                        "type": "message",
+                        "content": [{"type": "output_text", "text": "streamed"}],
+                    },
+                }
+                completed = {
+                    "type": "response.completed",
+                    "response": {
+                        "id": "resp_stream",
+                        "model": "gpt-5.2-codex",
+                        "status": "completed",
+                        "output": [],
+                        "usage": {"input_tokens": 1, "output_tokens": 1},
+                    },
+                }
+                yield f"data: {json.dumps(output_item)}"
+                yield f"data: {json.dumps(completed)}"
+                yield "data: [DONE]"
+
+        class FakeClient:
+            def stream(self, *args: Any, **kwargs: Any) -> FakeStream:
+                return FakeStream()
+
+        api = OpenAIAPI(api_key="test-api-key")
+        api._client = FakeClient()  # type: ignore[assignment]
+
+        result = await api._stream_response({})
+        assert result is not None
+        assert result["output"] == [
+            {
+                "type": "message",
+                "content": [{"type": "output_text", "text": "streamed"}],
+            }
+        ]
+
+    async def test_stream_response_raises_for_failed_event(self) -> None:
+        class FakeStream:
+            def __init__(self) -> None:
+                self.status_code = 200
+                self.headers = {"content-type": "text/event-stream"}
+
+            async def __aenter__(self) -> "FakeStream":
+                return self
+
+            async def __aexit__(self, *_: Any) -> None:
+                return None
+
+            async def aiter_lines(self) -> Any:
+                failed = {
+                    "type": "response.failed",
+                    "response": {"error": {"message": "bad request"}},
+                }
+                yield f"data: {json.dumps(failed)}"
+
+        class FakeClient:
+            def stream(self, *args: Any, **kwargs: Any) -> FakeStream:
+                return FakeStream()
+
+        api = OpenAIAPI(api_key="test-api-key")
+        api._client = FakeClient()  # type: ignore[assignment]
+
+        with pytest.raises(RuntimeError, match="bad request"):
+            await api._stream_response({})
+
+
+class TestRaiseOpenAIHttpError:
+    def test_extracts_error_message_from_json(self) -> None:
+        body = json.dumps(
+            {"error": {"message": "Invalid API key", "type": "invalid_request_error"}}
+        ).encode()
         with pytest.raises(RuntimeError, match="OpenAI API error: Invalid API key"):
-            await api.send(messages)
+            _raise_openai_http_error(400, body)
+
+    def test_falls_back_to_status_and_snippet(self) -> None:
+        with pytest.raises(RuntimeError, match="OpenAI API HTTP 502: Bad gateway"):
+            _raise_openai_http_error(502, b"Bad gateway")
 
 
 class TestSendMethod:

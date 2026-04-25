@@ -8,8 +8,14 @@ This module provides:
 
 from __future__ import annotations
 
+import copy
+import json
+from collections.abc import AsyncIterator, Sequence
 from types import TracebackType
-from typing import Any, Protocol, Self
+from typing import Any, Literal, Protocol, Self
+
+ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
+ReasoningSummary = Literal["concise", "detailed", "auto"]
 
 import httpx
 
@@ -24,16 +30,277 @@ from ..data_structures import (
     ToolResultContent,
     approx_token_count,
 )
+from ..tools.base import Tool
 
 __all__ = [
     "APIError",
     "APIClientMixin",
     "APIProtocol",
     "APPROX_BYTES_PER_TOKEN",
+    "CONTEXT_LENGTH_EXCEEDED_CODE",
+    "ContextWindowExceededError",
+    "DEFAULT_STREAM_IDLE_TIMEOUT",
+    "ReasoningEffort",
+    "ReasoningSummary",
     "approx_token_count",
+    "attach_collected_output",
+    "build_httpx_timeout",
+    "build_reasoning_block",
+    "consume_responses_sse_stream",
+    "force_required_all",
+    "is_context_window_error_payload",
+    "parse_responses_sse_text",
+    "parse_tool_arguments",
+    "raise_for_stream_event_error",
     "responses_tool_result_item",
     "responses_user_image_item",
+    "serialize_tool_arguments",
+    "unpack_dag_or_args",
 ]
+
+# Wire-level error code emitted by the OpenAI/Codex Responses API when an
+# input exceeds the model's context window. Codex-rs gates its
+# ContextWindowExceeded mapping on this exact string
+# (codex-api/src/sse/responses.rs ``is_context_window_error``).
+CONTEXT_LENGTH_EXCEEDED_CODE = "context_length_exceeded"
+
+
+_COLLECTABLE_OUTPUT_ITEM_TYPES = ("reasoning", "message", "function_call")
+
+# Mirrors codex-rs's DEFAULT_STREAM_IDLE_TIMEOUT_MS (300_000). High-effort
+# reasoning calls can leave an SSE stream silent for minutes between events,
+# so the per-chunk read budget must well exceed httpx's 5s default.
+DEFAULT_STREAM_IDLE_TIMEOUT = 300.0
+
+
+def build_httpx_timeout(read: float = DEFAULT_STREAM_IDLE_TIMEOUT) -> httpx.Timeout:
+    """Build the standard httpx.Timeout for Responses-API streaming clients.
+
+    ``read`` is the per-chunk idle budget — the analog of codex-rs's
+    ``stream_idle_timeout``. ``connect``/``write``/``pool`` stay short
+    so non-stream failures fail fast.
+    """
+    return httpx.Timeout(connect=10.0, read=read, write=30.0, pool=10.0)
+
+
+def build_reasoning_block(
+    effort: ReasoningEffort, summary: ReasoningSummary | None = None
+) -> dict[str, Any]:
+    """Build the ``reasoning`` field for a Responses-API request body.
+
+    ``summary`` is omitted when ``None`` because ``"auto"`` requires
+    organization verification on the public OpenAI API; callers opt in
+    explicitly. The Codex backend has no such restriction and passes
+    ``"detailed"`` directly.
+    """
+    block: dict[str, Any] = {"effort": effort}
+    if summary is not None:
+        block["summary"] = summary
+    return block
+
+
+def serialize_tool_arguments(input_dict: dict[str, Any] | None) -> str:
+    """Serialize a tool-call input dict to the JSON string the Responses API
+    expects in ``function_call.arguments``."""
+    if input_dict is None:
+        return "{}"
+    return json.dumps(input_dict)
+
+
+def parse_tool_arguments(arguments: str) -> dict[str, Any]:
+    """Parse a Responses-API ``function_call.arguments`` string back into a
+    dict, returning ``{}`` for malformed or non-object payloads."""
+    try:
+        result = json.loads(arguments)
+        return result if isinstance(result, dict) else {}
+    except json.JSONDecodeError:
+        return {}
+
+
+def unpack_dag_or_args(
+    messages: list[Message] | DAG,
+    tools: Sequence[Tool] | None,
+    system_prompt: str | None,
+) -> tuple[list[Message], Sequence[Tool] | None, str | None]:
+    """Resolve a DAG-or-args call into ``(messages, tools, system_prompt)``.
+
+    When ``messages`` is a DAG, its tools and system prompts override the
+    caller's arguments — but only when the DAG actually supplies them, so
+    a DAG with an empty tool tuple defers to the caller's ``tools``.
+    """
+    if not isinstance(messages, DAG):
+        return messages, tools, system_prompt
+    dag = messages
+    dag_messages = dag.to_messages()
+    dag_tools: list[Tool] = list(dag._tools or [])
+    dag_system_prompts = dag.head.get_system_prompts() if dag._heads else []
+    return (
+        dag_messages,
+        dag_tools if dag_tools else tools,
+        "\n\n".join(dag_system_prompts) if dag_system_prompts else system_prompt,
+    )
+
+
+_strict_schema_cache: dict[int, dict[str, Any]] = {}
+
+
+def force_required_all(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return a copy of ``schema`` with every property promoted to ``required``.
+
+    OpenAI's Responses-API strict mode requires every key in ``properties``
+    to also appear in ``required`` (and ``additionalProperties: false``).
+    ``schema_from_dataclass`` only marks fields without defaults as required,
+    so tools with optional fields would otherwise be rejected.
+
+    The input is deep-copied because ``Tool.input_schema`` returns a
+    ``ClassVar``-cached dict; mutating it would corrupt every subsequent use
+    of the tool class. The result is memoized by ``id(schema)`` so we only
+    pay the deepcopy + traversal cost once per tool class — every send()
+    re-fetches the same dict object from the ClassVar.
+    """
+    cached = _strict_schema_cache.get(id(schema))
+    if cached is not None:
+        return cached
+    result = copy.deepcopy(schema)
+    _force_required_all_inplace(result)
+    _strict_schema_cache[id(schema)] = result
+    return result
+
+
+def _force_required_all_inplace(schema: dict[str, Any]) -> None:
+    if schema.get("type") == "object":
+        props = schema.get("properties")
+        if isinstance(props, dict):
+            schema["required"] = list(props.keys())
+            for prop in props.values():
+                if isinstance(prop, dict):
+                    _force_required_all_inplace(prop)
+        additional = schema.get("additionalProperties")
+        if isinstance(additional, dict):
+            _force_required_all_inplace(additional)
+    elif schema.get("type") == "array":
+        items = schema.get("items")
+        if isinstance(items, dict):
+            _force_required_all_inplace(items)
+
+
+def attach_collected_output(
+    response: dict[str, Any] | None, collected_items: list[dict[str, Any]]
+) -> dict[str, Any] | None:
+    """Merge ``response.output_item.done`` items into the final response.
+
+    The Codex backend streams output items via ``response.output_item.done``
+    but emits an empty ``output`` array on ``response.completed``; the public
+    OpenAI Responses API populates ``output`` directly. This helper papers
+    over the difference: if the final response has no ``output`` but items
+    were collected separately, attach them.
+    """
+    if response is not None and not response.get("output") and collected_items:
+        return {**response, "output": collected_items}
+    return response
+
+
+def raise_for_stream_event_error(
+    event: dict[str, Any], *, source: str = "Responses API"
+) -> None:
+    """Raise ``RuntimeError`` if ``event`` represents a Responses-API failure.
+
+    Handles three cases that the Responses API uses to signal errors mid-
+    stream: a top-level ``error`` field, ``response.failed`` events, and
+    ``response.incomplete`` events with a populated ``incomplete_details``.
+    """
+    if event.get("error"):
+        raise RuntimeError(f"{source} error: {event['error']}")
+
+    etype = event.get("type")
+    if etype == "response.failed":
+        response = event.get("response")
+        error: object = None
+        if isinstance(response, dict):
+            error = response.get("error")
+        if isinstance(error, dict):
+            message = error.get("message") or error
+        else:
+            message = error or "response.failed event received"
+        raise RuntimeError(f"{source} error: {message}")
+
+    if etype == "response.incomplete":
+        reason = "unknown"
+        response = event.get("response")
+        if isinstance(response, dict):
+            incomplete_details = response.get("incomplete_details")
+            if isinstance(incomplete_details, dict):
+                raw_reason = incomplete_details.get("reason")
+                if isinstance(raw_reason, str) and raw_reason:
+                    reason = raw_reason
+        raise RuntimeError(f"{source} incomplete response: {reason}")
+
+
+async def consume_responses_sse_stream(
+    line_aiter: AsyncIterator[str], *, source: str = "Responses API"
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Drain a Responses-API SSE line stream and assemble the final response.
+
+    Returns ``(response, last_event_type)``. ``response`` is the body of the
+    final ``response.completed`` event with any separately-streamed output
+    items attached; ``last_event_type`` is informational, used by callers
+    to build a useful "no response received" message.
+
+    Raises ``RuntimeError`` for ``response.failed`` / ``response.incomplete``
+    via :func:`raise_for_stream_event_error`.
+    """
+    last_response: dict[str, Any] | None = None
+    last_event_type: str | None = None
+    collected_items: list[dict[str, Any]] = []
+    async for line in line_aiter:
+        if not line or not line.startswith("data: "):
+            continue
+        payload = line[6:]
+        if payload == "[DONE]":
+            break
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        last_event_type = event.get("type")
+        raise_for_stream_event_error(event, source=source)
+        if last_event_type == "response.completed":
+            last_response = event.get("response")
+        elif last_event_type == "response.output_item.done":
+            item = event.get("item") or {}
+            if item.get("type") in _COLLECTABLE_OUTPUT_ITEM_TYPES:
+                collected_items.append(item)
+    return attach_collected_output(last_response, collected_items), last_event_type
+
+
+def parse_responses_sse_text(
+    text: str, *, source: str = "Responses API"
+) -> dict[str, Any] | None:
+    """Synchronous variant of :func:`consume_responses_sse_stream` for the
+    case where a non-streaming endpoint returns a complete SSE-formatted
+    body in one shot (the Codex backend occasionally does this on errors).
+    """
+    last_response: dict[str, Any] | None = None
+    collected_items: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if not line.startswith("data: "):
+            continue
+        payload = line[6:]
+        if payload == "[DONE]":
+            break
+        try:
+            event = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        raise_for_stream_event_error(event, source=source)
+        etype = event.get("type")
+        if etype == "response.completed":
+            last_response = event.get("response")
+        elif etype == "response.output_item.done":
+            item = event.get("item") or {}
+            if item.get("type") in _COLLECTABLE_OUTPUT_ITEM_TYPES:
+                collected_items.append(item)
+    return attach_collected_output(last_response, collected_items)
 
 
 def responses_tool_result_item(block: ToolResultContent) -> dict[str, Any]:
@@ -141,6 +408,37 @@ class APIError(Exception):
             f"error_type={self.error_type!r}, "
             f"provider={self.provider!r})"
         )
+
+
+class ContextWindowExceededError(APIError):
+    """Raised when an API call's input exceeds the model's context window.
+
+    Mirrors codex-rs's ``CodexErr::ContextWindowExceeded`` (protocol/src/error.rs).
+    Detected from the wire-level ``error.code == "context_length_exceeded"``
+    (codex-rs ``is_context_window_error`` in codex-api/src/sse/responses.rs).
+
+    Callers — notably :meth:`CodexAPI.compact_dag` — catch this to drop the
+    oldest history item and retry, mirroring ``compact.rs:216-226``.
+    """
+
+    def __init__(self, message: str, provider: str = "unknown") -> None:
+        super().__init__(
+            message=message,
+            status_code=400,
+            error_type=CONTEXT_LENGTH_EXCEEDED_CODE,
+            provider=provider,
+        )
+
+
+def is_context_window_error_payload(error: Any) -> bool:
+    """Return ``True`` when an API error payload signals context-window overflow.
+
+    Mirrors codex-rs ``is_context_window_error`` (codex-api/src/sse/responses.rs):
+    a single field check on ``error.code == "context_length_exceeded"``. The
+    ``error`` argument is whatever the backend returned in its ``error`` slot
+    (typically a dict with ``code``, ``message``, ``type``).
+    """
+    return isinstance(error, dict) and error.get("code") == CONTEXT_LENGTH_EXCEEDED_CODE
 
 
 class APIProtocol(Protocol):

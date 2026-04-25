@@ -37,13 +37,22 @@ from nano_agent import DAG
 from nano_agent.providers.base import APIProtocol
 
 from .bot_agent import ensure_channel_worker
-from .bot_config import async_renew_oauth, build_api_from_env, get_bot_provider
+from .bot_config import (
+    async_renew_oauth,
+    build_api_from_env,
+    get_bot_provider,
+    maybe_discover_context_window,
+)
+from .bot_skills import DOWNLOAD_SKILL_PROMPT_SENTENCE
 from .bot_state import BotState, chunk_message, truncate
 from .slack_tools import (
     SLACK_MESSAGE_LIMIT,
     SlackContext,
     composite_channel_key,
     get_slack_tools,
+    is_slack_dm_channel,
+    resolve_slack_thread_ts,
+    slack_text_mentions_user,
 )
 
 load_dotenv()
@@ -67,19 +76,17 @@ _IGNORED_SUBTYPES = {
     "tombstone",
 }
 
-SYSTEM_PROMPT = (
+_BASE_SYSTEM_PROMPT = (
     "You are an assistant running 24/7 on a machine. "
     "You are connected with the user via Slack. "
-    "You have access to tools for reading files, running commands, "
-    "editing code, searching, and browsing the web. "
+    "{TOOLING_SUMMARY}"
     "Use the ExploreSlack tool first when you need to inspect current "
     "Slack context (workspace/channel/thread visibility). "
     "Use the SlackAPI tool for Slack Web API operations beyond the built-in tools. "
     "User uploads appear in the [Attachments] section of the incoming message "
     "with a url_private URL. To read an upload, call SlackDownloadFile with "
-    "that URL and a local save_path, then use Read (for text files) or other "
-    "tools on the saved path. Do not use WebFetch on Slack file URLs — they "
-    "require the bot token. "
+    "that URL and a local save_path, then {READ_GUIDANCE}. Do not use WebFetch "
+    "on Slack file URLs — they require the bot token. "
     "IMPORTANT: normal assistant text is internal-only and is not sent to the user. "
     "To send anything to Slack, you MUST call the SendUserMessage tool. "
     "Incoming user messages are queued. Use PeekQueuedUserMessages to inspect "
@@ -88,14 +95,48 @@ SYSTEM_PROMPT = (
     "Keep responses concise — Slack messages are split at ~3500 characters, "
     "so long responses will be sent as multiple messages. "
     "Slack markdown is mrkdwn flavor: *bold*, _italic_, `code`, ```block```, "
-    ">quote. Tables are not supported; use code blocks with aligned columns."
+    ">quote. Tables are not supported; use code blocks with aligned columns. "
+    + DOWNLOAD_SKILL_PROMPT_SENTENCE
 )
+
+_CLAUDE_TOOLING_SUMMARY = (
+    "You have access to tools for reading files, running commands, "
+    "editing code, searching, and browsing the web. "
+)
+_CODEX_TOOLING_SUMMARY = (
+    "You have access to codex-style tools: `exec_command` (with `write_stdin` "
+    "for follow-up input) for shell, `apply_patch` for file edits, "
+    "`view_image` for images, plus WebFetch and Stat. Use shell commands like "
+    "`ls`, `cat`, `find`, `grep`, `rg` via `exec_command` for filesystem "
+    "exploration and reads. "
+)
+
+
+def _build_system_prompt(use_codex_tools: bool) -> str:
+    if use_codex_tools:
+        return _BASE_SYSTEM_PROMPT.format(
+            TOOLING_SUMMARY=_CODEX_TOOLING_SUMMARY,
+            READ_GUIDANCE="use `exec_command` (e.g. `cat -n <path>`) on the saved path",
+        )
+    return _BASE_SYSTEM_PROMPT.format(
+        TOOLING_SUMMARY=_CLAUDE_TOOLING_SUMMARY,
+        READ_GUIDANCE="use Read (for text files) or other tools on the saved path",
+    )
+
+
+_USE_CODEX_TOOLS = get_bot_provider() == "codex"
+SYSTEM_PROMPT = _build_system_prompt(_USE_CODEX_TOOLS)
 
 
 app = AsyncApp(token=os.getenv("SLACK_BOT_TOKEN"))
 api: APIProtocol = build_api_from_env()
 state = BotState(state_root=Path("logs/slack_agent_state"))
-state.tools_factory = lambda: get_slack_tools(state, app.client)
+state.tools_factory = lambda: get_slack_tools(
+    state,
+    app.client,
+    system_prompt=SYSTEM_PROMPT,
+    use_codex_tools=_USE_CODEX_TOOLS,
+)
 _bot_user_id: str | None = None
 
 # Slack renders user mentions as ``<@U01234>`` in raw text; strip the bot's
@@ -117,9 +158,7 @@ def _describe_slack_file(f: dict[str, Any]) -> str:
 
 
 def _create_session(cwd: str | None = None) -> DAG:
-    return state.create_session(
-        cwd, system_prompt=SYSTEM_PROMPT, tools=get_slack_tools(state, app.client)
-    )
+    return state.create_session_from_factory(cwd, system_prompt=SYSTEM_PROMPT)
 
 
 # --- Adapter shim: channel_worker expects ``channel`` to have a platform-specific
@@ -166,18 +205,35 @@ async def on_message(event: dict[str, Any], client: Any) -> None:
     if event.get("subtype") in _IGNORED_SUBTYPES:
         return
     channel_type = event.get("channel_type")
-    if channel_type == "im":
+    is_dm = is_slack_dm_channel(str(event.get("channel") or ""), channel_type)
+    if not is_dm and slack_text_mentions_user(event.get("text"), _bot_user_id):
+        return
+    if is_dm:
+        await _handle_user_message(event)
+    elif _is_known_thread_message(event):
         await _handle_user_message(event)
     elif RESPOND_TO_ALL_MESSAGES and channel_type in {"channel", "group"}:
-        await _handle_user_message(event, force=True)
+        await _handle_user_message(event)
 
 
-async def _handle_user_message(event: dict[str, Any], *, force: bool = False) -> None:
+def _is_known_thread_message(event: dict[str, Any]) -> bool:
+    channel_id = event.get("channel")
+    thread_ts = event.get("thread_ts")
+    if not channel_id or not thread_ts:
+        return False
+    key = composite_channel_key(str(channel_id), str(thread_ts))
+    return (
+        key in state.sessions
+        or key in state.channel_message_queues
+        or state.is_persisted_channel(key)
+    )
+
+
+async def _handle_user_message(event: dict[str, Any]) -> None:
     channel_id = event.get("channel")
     user_id = event.get("user")
     text = event.get("text") or ""
     ts = event.get("ts")
-    thread_ts = event.get("thread_ts") or (ts if force else None)
 
     if not channel_id or not user_id:
         return
@@ -193,10 +249,15 @@ async def _handle_user_message(event: dict[str, Any], *, force: bool = False) ->
     if not cleaned:
         return
 
-    # For channel messages we always reply in-thread so the channel stays tidy.
-    # For DMs, thread_ts stays None (DMs don't thread).
-    if event.get("channel_type") != "im" and thread_ts is None:
-        thread_ts = ts
+    # For channel messages we reply in-thread so the channel stays tidy.
+    # Normal DMs stay on the plain DM conversation; explicit thread replies keep
+    # their thread_ts.
+    thread_ts = resolve_slack_thread_ts(
+        str(channel_id),
+        event.get("channel_type"),
+        str(ts) if ts else None,
+        str(event["thread_ts"]) if event.get("thread_ts") else None,
+    )
 
     key = composite_channel_key(str(channel_id), thread_ts)
     state.channel_last_user_id[key] = str(user_id)
@@ -300,7 +361,7 @@ async def cmd_cwd(ack: Any, command: dict[str, Any]) -> None:
 async def cmd_thread(ack: Any, command: dict[str, Any], client: Any) -> None:
     channel_id = str(command.get("channel_id") or "")
     user_id = str(command.get("user_id") or "")
-    topic = (command.get("text") or "New conversation").strip()
+    topic = (command.get("text") or "").strip() or "New conversation"
     try:
         parent = await client.chat_postMessage(channel=channel_id, text=f"*{topic}*")
     except Exception as e:
@@ -312,6 +373,8 @@ async def cmd_thread(ack: Any, command: dict[str, Any], client: Any) -> None:
         return
     key = composite_channel_key(channel_id, new_ts)
     cwd = state.working_dirs.get(user_id)
+    if user_id:
+        state.channel_last_user_id[key] = user_id
     state.set_session(key, _create_session(cwd))
     await ack(
         _ack_text(
@@ -336,6 +399,7 @@ async def cmd_renew(ack: Any, command: dict[str, Any]) -> None:
     try:
         await async_renew_oauth()
         api = build_api_from_env()
+        await maybe_discover_context_window(api)
         state.delete_all_session_files()
         state.sessions.clear()
     except Exception as e:
@@ -354,15 +418,21 @@ async def _async_main() -> None:
         print("Error: set SLACK_BOT_TOKEN and SLACK_APP_TOKEN in .env or environment")
         sys.exit(1)
 
-    auth = await app.client.auth_test()
+    auth, _ = await asyncio.gather(
+        app.client.auth_test(),
+        maybe_discover_context_window(api),
+    )
     _bot_user_id = auth.get("user_id")
     print(
         f"[READY] Slack bot user={_bot_user_id} team={auth.get('team')} "
-        f"provider={get_bot_provider()}"
+        f"provider={get_bot_provider()} "
+        f"model={getattr(api, 'model', None)} "
+        f"reasoning_effort={getattr(api, 'reasoning_effort', None)} "
+        f"context_window={getattr(api, 'context_window', None)}"
     )
     await _recover_pending_queues()
     handler = AsyncSocketModeHandler(app, app_token)
-    await handler.start_async()  # type: ignore[no-untyped-call]
+    await handler.start_async()
 
 
 def main() -> None:

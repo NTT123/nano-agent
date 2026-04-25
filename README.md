@@ -276,7 +276,8 @@ BOT_PROVIDER=codex uv run nano-slack-bot
 
 ### Behavior
 
-- **DMs** to the bot: always answered.
+- **DMs** to the bot: always answered in the DM by default. If the user asks
+  for a new thread, the bot can explicitly create one with `CreateThread`.
 - **Channel messages**: the bot responds when **mentioned** (`@nano-bot`), or when a user replies in a thread the bot is already in. Set `SLACK_RESPOND_TO_ALL_MESSAGES=true` to respond to every message in channels the bot is in (not recommended for busy workspaces).
 - **Threads**: each thread is its own conversation (keyed by `channel_id:thread_ts`). Channel-level messages reply in-thread by default so the main channel stays tidy.
 
@@ -290,7 +291,7 @@ Same surface as Discord — names differ only in platform flavor:
 | `/queue` | Show queued user messages |
 | `/cd <path>` | Change working directory |
 | `/cwd` | Show current working directory |
-| `/thread <topic>` | Open a new thread in the current channel and start a conversation |
+| `/thread <topic>` | Open a new thread in the current channel/DM and start a conversation |
 | `/renew` | Re-run OAuth login for the active provider |
 
 ### Slack-specific tools

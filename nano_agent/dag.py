@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 
 from .data_structures import (
+    CompactionContent,
     ContentBlock,
     ImageContent,
     Message,
@@ -54,7 +55,6 @@ from .data_structures import (
     parse_tool_definitions,
     parse_tool_execution,
 )
-from .tools import Tool
 
 
 def _generate_id() -> str:
@@ -70,6 +70,7 @@ _MESSAGE_BLOCKS = (
     ToolUseContent,
     ToolResultContent,
     ImageContent,
+    CompactionContent,
 )
 
 
@@ -122,7 +123,7 @@ class Node:
             data=SystemPrompt(content=prompt),
         )
 
-    def tools(self, *tools: "Tool") -> "Node":
+    def tools(self, *tools: Any) -> "Node":
         """Add tool definitions as a child node.
 
         Args:
@@ -191,16 +192,19 @@ class Node:
         """Get ancestors in causal order (parents before children)."""
         result: list[Node] = []
         visited: set[str] = set()
-
-        def visit(node: Node) -> None:
+        # Iterative to avoid Python's recursion limit on deep DAGs.
+        stack: list[tuple[Node, bool]] = [(self, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if expanded:
+                result.append(node)
+                continue
             if node.id in visited:
-                return
+                continue
             visited.add(node.id)
-            for parent in node.parents:
-                visit(parent)
-            result.append(node)
-
-        visit(self)
+            stack.append((node, True))
+            for parent in reversed(node.parents):
+                stack.append((parent, False))
         return result
 
     def to_messages(self) -> list[Message]:
@@ -407,12 +411,12 @@ class DAG:
     """
 
     _heads: tuple[Node, ...] = field(default_factory=tuple)
-    _tools: tuple[Tool, ...] | None = None
+    _tools: tuple[Any, ...] | None = None
 
     def _with_heads(
         self,
         heads: tuple[Node, ...] | list[Node],
-        tools: Sequence[Tool] | None = None,
+        tools: Sequence[Any] | None = None,
     ) -> DAG:
         """Internal: Create new DAG with updated heads.
 
@@ -488,7 +492,7 @@ class DAG:
             # Additional system prompt - just append
             return self._with_heads(self._append_to_heads(SystemPrompt(content=prompt)))
 
-    def tools(self, *tools: Tool) -> DAG:
+    def tools(self, *tools: Any) -> DAG:
         """Add tool definitions.
 
         Args:

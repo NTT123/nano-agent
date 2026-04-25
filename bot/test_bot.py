@@ -89,6 +89,19 @@ class MockChannel:
         return _AsyncNoop()
 
 
+class MockSlackClient:
+    """Captures Slack chat.postMessage calls."""
+
+    def __init__(self, ts_values: list[str] | None = None):
+        self.posts: list[dict[str, Any]] = []
+        self.ts_values = ts_values or ["111.000", "111.001", "111.002"]
+
+    async def chat_postMessage(self, **kwargs: Any) -> dict[str, str]:
+        self.posts.append(kwargs)
+        idx = min(len(self.posts) - 1, len(self.ts_values) - 1)
+        return {"ts": self.ts_values[idx]}
+
+
 class _AsyncNoop:
     async def __aenter__(self):
         return self
@@ -167,6 +180,51 @@ class TestTruncate:
         text = "x" * 300
         result = truncate(text)
         assert result == "x" * 200 + "..."
+
+
+class TestSlackThreadRouting:
+    def test_bot_mentions_are_detected_by_exact_user_id(self):
+        from .slack_tools import slack_text_mentions_user
+
+        assert slack_text_mentions_user("hi <@U123>", "U123") is True
+        assert slack_text_mentions_user("hi <@U999>", "U123") is False
+        assert slack_text_mentions_user("hi <@U123>", None) is False
+
+    def test_dm_stays_unthreaded_without_channel_type(self):
+        from .slack_tools import composite_channel_key, resolve_slack_thread_ts
+
+        thread_ts = resolve_slack_thread_ts(
+            "D123",
+            None,
+            "111.222",
+            None,
+        )
+        assert thread_ts is None
+        assert composite_channel_key("D123", thread_ts) == "D123"
+
+    def test_existing_thread_reply_preserves_thread_ts(self):
+        from .slack_tools import composite_channel_key, resolve_slack_thread_ts
+
+        thread_ts = resolve_slack_thread_ts(
+            "D123",
+            "im",
+            "111.333",
+            "111.000",
+        )
+        assert thread_ts == "111.000"
+        assert composite_channel_key("D123", thread_ts) == "D123:111.000"
+
+    def test_channel_message_threads_by_default(self):
+        from .slack_tools import composite_channel_key, resolve_slack_thread_ts
+
+        thread_ts = resolve_slack_thread_ts(
+            "C123",
+            "channel",
+            "222.000",
+            None,
+        )
+        assert thread_ts == "222.000"
+        assert composite_channel_key("C123", thread_ts) == "C123:222.000"
 
 
 class TestIsEmptyAssistantMessage:
@@ -387,6 +445,94 @@ class TestSendUserMessageTool:
         tool = SendUserMessageTool(state=s)
         result = await tool(SendUserMessageInput(message="hi"))
         assert "Error" in result.content.text
+
+
+class TestSlackSendUserMessageTool:
+    @pytest.mark.asyncio
+    async def test_dm_reply_has_no_thread_ts(self):
+        from .slack_tools import (
+            SlackContext,
+            SlackSendUserMessageInput,
+            SlackSendUserMessageTool,
+        )
+
+        client = MockSlackClient()
+        s = BotState(
+            active_channel=SlackContext(channel_id="D123"),
+            active_channel_id="D123",
+        )
+        tool = SlackSendUserMessageTool(state=s, client=client)  # type: ignore[arg-type]
+
+        result = await tool(SlackSendUserMessageInput(message="hello"))
+
+        assert "Sent 1 chunk" in result.content.text
+        assert client.posts == [{"channel": "D123", "text": "hello", "thread_ts": None}]
+
+    @pytest.mark.asyncio
+    async def test_thread_reply_uses_active_thread_ts(self):
+        from .slack_tools import (
+            SlackContext,
+            SlackSendUserMessageInput,
+            SlackSendUserMessageTool,
+        )
+
+        client = MockSlackClient()
+        s = BotState(
+            active_channel=SlackContext(channel_id="D123", thread_ts="111.000"),
+            active_channel_id="D123:111.000",
+        )
+        tool = SlackSendUserMessageTool(state=s, client=client)  # type: ignore[arg-type]
+
+        await tool(SlackSendUserMessageInput(message="thread hello"))
+
+        assert client.posts == [
+            {"channel": "D123", "text": "thread hello", "thread_ts": "111.000"}
+        ]
+
+
+class TestSlackCreateThreadTool:
+    @pytest.mark.asyncio
+    async def test_creates_visible_thread_and_slack_session(self, tmp_path: Path):
+        from .slack_tools import (
+            SlackContext,
+            SlackCreateThreadInput,
+            SlackCreateThreadTool,
+            composite_channel_key,
+        )
+
+        client = MockSlackClient(ts_values=["111.000", "111.001"])
+        s = BotState(
+            active_channel=SlackContext(channel_id="D123"),
+            active_channel_id="D123",
+            state_root=tmp_path / "state",
+        )
+        s.tools_factory = lambda: []
+        s.channel_last_user_id["D123"] = "U123"
+        s.working_dirs["U123"] = str(tmp_path)
+        tool = SlackCreateThreadTool(
+            state=s,
+            client=client,  # type: ignore[arg-type]
+            system_prompt="Slack system",
+        )
+
+        result = await tool(SlackCreateThreadInput(topic="Investigate"))
+
+        new_key = composite_channel_key("D123", "111.000")
+        assert "Thread started" in result.content.text
+        assert client.posts == [
+            {"channel": "D123", "text": "*Investigate*"},
+            {
+                "channel": "D123",
+                "text": "<@U123> Thread ready. Reply here to continue.",
+                "thread_ts": "111.000",
+            },
+        ]
+        assert s.channel_last_user_id[new_key] == "U123"
+        assert new_key in s.sessions
+        assert s._session_file(new_key).exists()
+        assert s.sessions[new_key].head.get_system_prompts() == [
+            f"Slack system\n\nThe user's working directory is: {tmp_path}"
+        ]
 
 
 class TestSendFileTool:

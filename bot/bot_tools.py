@@ -16,11 +16,12 @@ from typing import Annotated, Any
 import discord
 import httpx
 
-from nano_agent import ExecutionContext, TextContent, get_default_tools
+from nano_agent import ExecutionContext, TextContent, get_codex_tools, get_default_tools
 from nano_agent.tools.base import Desc, Tool, ToolResult
 
 from .bot_introspect import InspectBotStateTool
-from .bot_state import BotState, chunk_message
+from .bot_skills import get_bot_skill_tools
+from .bot_state import BotState, chunk_message, format_user_mention
 
 # --- Helpers ---
 
@@ -415,6 +416,7 @@ class CreateThreadTool(Tool):
         "in the new thread."
     )
     state: BotState = field(default_factory=BotState, repr=False)
+    system_prompt: str = field(default="", repr=False)
 
     async def __call__(
         self,
@@ -440,18 +442,29 @@ class CreateThreadTool(Tool):
                 content=TextContent(text="Error: Cannot create thread here")
             )
 
+        active_key = self.state.active_channel_id
+        user_id = (
+            self.state.channel_last_user_id.get(active_key) if active_key else None
+        )
+        cwd = self.state.working_dirs.get(user_id) if user_id is not None else None
         try:
             thread = await target.create_thread(
                 name=input.topic,
                 type=discord.ChannelType.public_thread,
             )
-            self.state.sessions[str(thread.id)] = self.state.create_session()
-            initial = input.message or f"New conversation started: **{input.topic}**"
+            if user_id is not None:
+                self.state.channel_last_user_id[str(thread.id)] = user_id
+            self.state.set_session(
+                str(thread.id),
+                self.state.create_session_from_factory(cwd, self.system_prompt),
+            )
+            body = input.message or f"New conversation started: **{input.topic}**"
+            initial = f"{format_user_mention(user_id)} {body}" if user_id else body
             await thread.send(initial)
             return ToolResult(
                 content=TextContent(
                     text=f"Thread created: #{thread.name} (id: {thread.id}). "
-                    "The user can now continue the conversation there."
+                    "The user was tagged and can reply in the thread to continue."
                 )
             )
         except Exception as e:
@@ -773,17 +786,28 @@ class RestartBotTool(Tool):
         return ToolResult(content=TextContent(text="Restarting..."))
 
 
-def get_discord_tools(state: BotState) -> list[Tool]:
-    """Discord tool set: default tools + Discord-specific tools."""
-    tools: list[Tool] = [t for t in get_default_tools() if t.name != "AskUserQuestion"]
+def get_discord_tools(
+    state: BotState,
+    *,
+    system_prompt: str = "",
+    use_codex_tools: bool = False,
+) -> list[Tool]:
+    """Discord tool set: base tools + Discord-specific tools.
+
+    When ``use_codex_tools`` is True, the base set is the codex-style tool
+    suite instead of the Claude-flavored defaults.
+    """
+    base_tools = get_codex_tools() if use_codex_tools else get_default_tools()
+    tools: list[Tool] = [t for t in base_tools if t.name != "AskUserQuestion"]
     tools.append(SendUserMessageTool(state=state))
     tools.append(PeekQueuedUserMessagesTool(state=state))
     tools.append(DequeueUserMessagesTool(state=state))
     tools.append(SendFileTool(state=state))
-    tools.append(CreateThreadTool(state=state))
+    tools.append(CreateThreadTool(state=state, system_prompt=system_prompt))
     tools.append(ExploreDiscordTool(state=state))
     tools.append(DiscordAPITool(state=state))
     tools.append(ClearContextTool(state=state))
     tools.append(RestartBotTool(state=state))
     tools.append(InspectBotStateTool(state=state))
+    tools.extend(get_bot_skill_tools())
     return tools

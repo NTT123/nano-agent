@@ -20,6 +20,8 @@ from .dag import DAG, Node
 
 # Data structures - Core types
 from .data_structures import (  # Enums; Content blocks (sum type: ContentBlock); Messages; Node data (sum type: NodeData); Exhaustiveness helper; JSON type aliases; Serialization TypedDicts (for type-safe dict handling); Sub-agent support
+    CompactionContent,
+    CompactionContentDict,
     ContentBlock,
     ContentBlockDict,
     ImageContent,
@@ -185,6 +187,8 @@ __all__ = [
     "ToolResultContent",
     "ImageContent",
     "ImageContentDict",
+    "CompactionContent",
+    "CompactionContentDict",
     "render_content_text",
     "NodeData",
     "SystemPrompt",
