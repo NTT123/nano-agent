@@ -16,6 +16,31 @@ from enum import Enum
 from typing import Never, NotRequired, Required, TypeAlias, TypedDict
 
 # =============================================================================
+# Token estimation
+# =============================================================================
+
+# Mirrors codex-rs's APPROX_BYTES_PER_TOKEN (utils/string/src/truncate.rs:4).
+# Used as a quick byte-based estimator wherever a tokenizer isn't available —
+# tool-result sizing for auto-compaction (executor) and shell-output truncation
+# (exec_command tool).
+APPROX_BYTES_PER_TOKEN = 4
+
+
+def approx_token_count(text: str) -> int:
+    """Approximate token count for ``text`` using codex-rs's 4-bytes/token
+    heuristic with ceiling division.
+
+    Uses ``errors="replace"`` so subprocess output containing invalid UTF-8
+    (lone surrogates, truncated multibyte sequences) doesn't blow up the
+    estimator — counting under-/over-by-one bytes is acceptable; raising is not.
+    """
+    if not text:
+        return 0
+    nbytes = len(text.encode("utf-8", errors="replace"))
+    return (nbytes + APPROX_BYTES_PER_TOKEN - 1) // APPROX_BYTES_PER_TOKEN
+
+
+# =============================================================================
 # JSON Type Aliases
 # =============================================================================
 

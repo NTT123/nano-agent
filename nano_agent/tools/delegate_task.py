@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import shutil
 from dataclasses import dataclass
 from typing import Annotated, ClassVar
 
 from ..data_structures import TextContent
 from ..execution_context import ExecutionContext
-from .base import Desc, Tool
+from .base import Desc, Tool, terminate_process
 
 
 @dataclass
@@ -125,10 +126,13 @@ Returns: the sub-agent's stdout (its final answer plus any progress logs)."""
             cmd.extend(["--cd", input.cwd])
         cmd.append(input.prompt)
 
+        # start_new_session so terminate_process(kill_group=True) reaches
+        # any grandchildren codex spawns.
         process = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            start_new_session=(os.name != "nt"),
         )
 
         try:
@@ -136,13 +140,11 @@ Returns: the sub-agent's stdout (its final answer plus any progress logs)."""
                 process.communicate(), timeout=timeout
             )
         except asyncio.CancelledError:
-            await self._terminate(process)
+            await terminate_process(process, kill_group=True)
             raise
         except asyncio.TimeoutError:
-            await self._terminate(process)
-            return TextContent(
-                text=f"Error: codex exec timed out after {timeout}s"
-            )
+            await terminate_process(process, kill_group=True)
+            return TextContent(text=f"Error: codex exec timed out after {timeout}s")
 
         stdout = stdout_b.decode(errors="replace")
         stderr = stderr_b.decode(errors="replace")
@@ -159,14 +161,3 @@ Returns: the sub-agent's stdout (its final answer plus any progress logs)."""
 
         output = stdout.strip() or stderr.strip() or "(no output)"
         return TextContent(text=output)
-
-    @staticmethod
-    async def _terminate(process: asyncio.subprocess.Process) -> None:
-        if process.returncode is not None:
-            return
-        process.terminate()
-        try:
-            await asyncio.wait_for(process.wait(), timeout=2.0)
-        except asyncio.TimeoutError:
-            process.kill()
-            await process.wait()

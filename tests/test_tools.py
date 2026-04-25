@@ -1,17 +1,33 @@
+import asyncio
+import base64
+import os
+import re
+import shlex
+import stat
+import sys
 from typing import cast
 
+import pytest
+
 from nano_agent.tools import (
+    ApplyPatchTool,
     BashTool,
+    DelegateTaskTool,
+    DownloadSkillTool,
     EditTool,
+    ExecCommandTool,
     GlobTool,
     GrepTool,
     InputSchemaDict,
     PythonTool,
     ReadTool,
+    Skill,
     StatTool,
     TodoWriteTool,
     Tool,
+    ViewImageTool,
     WebFetchTool,
+    WriteStdinTool,
     WriteTool,
     get_default_tools,
 )
@@ -20,6 +36,16 @@ from nano_agent.tools import (
 def get_properties(schema: InputSchemaDict) -> dict[str, object]:
     """Helper to get properties from schema with proper typing."""
     return cast(dict[str, object], schema.get("properties", {}))
+
+
+def python_cmd(code: str) -> str:
+    return f"{shlex.quote(sys.executable)} -c {shlex.quote(code)}"
+
+
+def extract_session_id(text: str) -> int:
+    match = re.search(r"Process running with session ID (\d+)", text)
+    assert match is not None
+    return int(match.group(1))
 
 
 class TestToolBase:
@@ -102,6 +128,75 @@ class TestBashTool:
         assert "timeout" in props
         assert "run_in_background" in props
         assert schema["required"] == ["command"]
+
+
+class TestExecCommandTool:
+    def test_default_values(self) -> None:
+        tool = ExecCommandTool()
+        assert tool.name == "exec_command"
+        assert "session ID" in tool.description
+
+    def test_input_schema_matches_codex_shape(self) -> None:
+        tool = ExecCommandTool()
+        schema = tool.input_schema
+        props = get_properties(schema)
+        expected_props = {
+            "cmd",
+            "workdir",
+            "shell",
+            "tty",
+            "yield_time_ms",
+            "max_output_tokens",
+            "login",
+            "sandbox_permissions",
+            "justification",
+            "prefix_rule",
+        }
+        assert expected_props <= set(props)
+        assert schema["required"] == ["cmd"]
+
+
+class TestWriteStdinTool:
+    def test_default_values(self) -> None:
+        tool = WriteStdinTool()
+        assert tool.name == "write_stdin"
+        assert "unified exec session" in tool.description
+
+    def test_input_schema_matches_codex_shape(self) -> None:
+        tool = WriteStdinTool()
+        schema = tool.input_schema
+        props = get_properties(schema)
+        expected_props = {"session_id", "chars", "yield_time_ms", "max_output_tokens"}
+        assert expected_props <= set(props)
+        assert schema["required"] == ["session_id"]
+
+
+class TestApplyPatchTool:
+    def test_default_values(self) -> None:
+        tool = ApplyPatchTool()
+        assert tool.name == "apply_patch"
+        assert "edit files" in tool.description
+
+    def test_input_schema_matches_codex_json_shape(self) -> None:
+        tool = ApplyPatchTool()
+        schema = tool.input_schema
+        props = get_properties(schema)
+        assert "input" in props
+        assert schema["required"] == ["input"]
+
+
+class TestViewImageTool:
+    def test_default_values(self) -> None:
+        tool = ViewImageTool()
+        assert tool.name == "view_image"
+        assert "local image" in tool.description
+
+    def test_input_schema_matches_codex_shape(self) -> None:
+        tool = ViewImageTool()
+        schema = tool.input_schema
+        props = get_properties(schema)
+        assert {"path", "detail"} <= set(props)
+        assert schema["required"] == ["path"]
 
 
 class TestGlobTool:
@@ -223,6 +318,179 @@ class TestTodoWriteTool:
         assert schema["required"] == ["todos"]
 
 
+class TestDownloadSkillTool:
+    def test_default_values_empty_skills(self) -> None:
+        tool = DownloadSkillTool()
+        assert tool.name == "DownloadSkill"
+        assert "Download a skill" in tool.description
+        assert "No skills are currently registered" in tool.description
+
+    def test_input_schema_has_required_fields(self) -> None:
+        tool = DownloadSkillTool()
+        schema = tool.input_schema
+        props = get_properties(schema)
+        assert "name" in props
+        assert schema["required"] == ["name"]
+
+    def test_description_compiles_skill_descriptions(self) -> None:
+        tool = DownloadSkillTool(
+            skills=[
+                Skill(
+                    name="kung_fu",
+                    description="Use when you need to fight",
+                    knowledge="Block, strike, sweep",
+                ),
+                Skill(
+                    name="helicopter",
+                    description="Use when you need to fly a chopper",
+                    knowledge="Pull collective, push cyclic",
+                ),
+            ]
+        )
+        assert "kung_fu: Use when you need to fight" in tool.description
+        assert "helicopter: Use when you need to fly a chopper" in tool.description
+
+    def test_returns_knowledge_for_known_skill(self) -> None:
+        tool = DownloadSkillTool(
+            skills=[
+                Skill(
+                    name="kung_fu",
+                    description="Use when you need to fight",
+                    knowledge="Block, strike, sweep",
+                ),
+            ]
+        )
+        result = asyncio.run(tool.execute({"name": "kung_fu"}))
+        assert isinstance(result.content, TextContent)
+        assert result.content.text == "Block, strike, sweep"
+
+    def test_returns_error_for_unknown_skill(self) -> None:
+        tool = DownloadSkillTool(
+            skills=[
+                Skill(name="kung_fu", description="d", knowledge="k"),
+            ]
+        )
+        result = asyncio.run(tool.execute({"name": "missing"}))
+        assert isinstance(result.content, TextContent)
+        assert "not found" in result.content.text
+        assert "kung_fu" in result.content.text
+
+    def test_returns_error_when_skills_empty(self) -> None:
+        tool = DownloadSkillTool()
+        result = asyncio.run(tool.execute({"name": "anything"}))
+        assert isinstance(result.content, TextContent)
+        assert "not found" in result.content.text
+        assert "(none)" in result.content.text
+
+    def test_description_argument_is_rejected(self) -> None:
+        with pytest.raises(TypeError):
+            DownloadSkillTool(description="custom")  # type: ignore[call-arg]
+
+
+class FakeCodex:
+    """Helper that writes an executable shell script to a tmp dir on PATH."""
+
+    def __init__(self, script_path: "os.PathLike[str]") -> None:
+        self.script_path = script_path
+
+    def set_script(self, body: str) -> None:
+        from pathlib import Path
+
+        path = Path(self.script_path)
+        path.write_text(body)
+        path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+
+
+@pytest.fixture
+def fake_codex(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
+    """Provide a stand-in `codex` binary on PATH; tests fill in its body."""
+    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    return FakeCodex(tmp_path / "codex")
+
+
+class TestDelegateTaskTool:
+    def test_default_values(self) -> None:
+        tool = DelegateTaskTool()
+        assert tool.name == "DelegateTask"
+        assert "Delegate a task" in tool.description
+
+    def test_input_schema_has_required_fields(self) -> None:
+        tool = DelegateTaskTool()
+        schema = tool.input_schema
+        props = get_properties(schema)
+        assert "prompt" in props
+        assert "model" in props
+        assert "sandbox" in props
+        assert "cwd" in props
+        assert "timeout" in props
+        assert schema["required"] == ["prompt"]
+
+    def test_empty_prompt_returns_error(self) -> None:
+        tool = DelegateTaskTool()
+        result = asyncio.run(tool.execute({"prompt": "   "}))
+        assert isinstance(result.content, TextContent)
+        assert "prompt is required" in result.content.text
+
+    def test_invalid_sandbox_returns_error(self) -> None:
+        tool = DelegateTaskTool()
+        result = asyncio.run(tool.execute({"prompt": "do x", "sandbox": "wide-open"}))
+        assert isinstance(result.content, TextContent)
+        assert "invalid sandbox" in result.content.text
+
+    def test_missing_codex_returns_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr("shutil.which", lambda _name: None)
+        tool = DelegateTaskTool()
+        result = asyncio.run(tool.execute({"prompt": "anything"}))
+        assert isinstance(result.content, TextContent)
+        assert "codex CLI not found" in result.content.text
+
+    def test_successful_execution(self, fake_codex: "FakeCodex") -> None:
+        fake_codex.set_script(
+            "#!/bin/sh\n" 'echo "ARGS: $*"\n' "echo SUB_AGENT_OUTPUT\n"
+        )
+        tool = DelegateTaskTool()
+        result = asyncio.run(
+            tool.execute(
+                {
+                    "prompt": "Research X",
+                    "model": "gpt-5",
+                    "sandbox": "read-only",
+                }
+            )
+        )
+        assert isinstance(result.content, TextContent)
+        text = result.content.text
+        assert "SUB_AGENT_OUTPUT" in text
+        assert "exec" in text
+        assert "--model gpt-5" in text
+        assert "--sandbox read-only" in text
+        assert "--skip-git-repo-check" in text
+        assert "Research X" in text
+
+    def test_failure_exit_code_returns_error(self, fake_codex: "FakeCodex") -> None:
+        fake_codex.set_script("#!/bin/sh\n" "echo 'something broke' >&2\n" "exit 2\n")
+        tool = DelegateTaskTool()
+        result = asyncio.run(tool.execute({"prompt": "anything"}))
+        assert isinstance(result.content, TextContent)
+        assert "exit" in result.content.text.lower()
+        assert "code 2" in result.content.text
+        assert "something broke" in result.content.text
+
+    def test_passes_cwd_when_set(self, fake_codex: "FakeCodex") -> None:
+        fake_codex.set_script('#!/bin/sh\necho "ARGS: $*"\n')
+        tool = DelegateTaskTool()
+        result = asyncio.run(
+            tool.execute(
+                {
+                    "prompt": "p",
+                    "cwd": "/tmp/work",
+                }
+            )
+        )
+        assert isinstance(result.content, TextContent)
+        assert "--cd /tmp/work" in result.content.text
+
+
 class TestStatTool:
     def test_default_values(self) -> None:
         tool = StatTool()
@@ -309,12 +577,13 @@ import asyncio
 from dataclasses import dataclass
 from typing import Annotated
 
-from nano_agent import TextContent
+from nano_agent import ImageContent, TextContent
 from nano_agent.tools import (
     BashInput,
     Desc,
     TodoItemInput,
     TodoWriteInput,
+    cleanup_exec_command_sessions,
     convert_input,
     get_call_input_type,
     schema_from_dataclass,
@@ -462,6 +731,257 @@ class TestBashInputSchema:
         result = asyncio.run(tool.execute({"command": "echo hello"}))
         assert isinstance(result, TextContent)
         assert "hello" in result.text
+
+
+class TestExecCommandToolFunctional:
+    """Functional tests for the Codex-style exec_command tool."""
+
+    def teardown_method(self) -> None:
+        asyncio.run(cleanup_exec_command_sessions())
+
+    def test_exec_command_runs_command(self) -> None:
+        tool = ExecCommandTool()
+        result = asyncio.run(
+            tool.execute(
+                {
+                    "cmd": python_cmd("print('hello')"),
+                    "shell": "/bin/sh",
+                    "login": False,
+                }
+            )
+        )
+
+        assert isinstance(result.content, TextContent)
+        assert re.search(r"^Chunk ID: [0-9a-f]{6}$", result.content.text, re.M)
+        assert "Process exited with code 0" in result.content.text
+        assert "Original token count:" in result.content.text
+        assert "hello" in result.content.text
+
+    def test_exec_command_uses_workdir(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            tool = ExecCommandTool()
+            result = asyncio.run(
+                tool.execute(
+                    {
+                        "cmd": python_cmd(
+                            "from pathlib import Path; print(Path.cwd())"
+                        ),
+                        "workdir": temp_dir,
+                        "shell": "/bin/sh",
+                        "login": False,
+                    }
+                )
+            )
+
+        assert isinstance(result.content, TextContent)
+        assert "Process exited with code 0" in result.content.text
+        assert temp_dir in result.content.text
+
+    def test_exec_command_returns_session_id_when_still_running(self) -> None:
+        tool = ExecCommandTool()
+        result = asyncio.run(
+            tool.execute(
+                {
+                    "cmd": python_cmd("import time; time.sleep(5)"),
+                    "shell": "/bin/sh",
+                    "login": False,
+                    "yield_time_ms": 1,
+                }
+            )
+        )
+
+        assert isinstance(result.content, TextContent)
+        assert "Process running with session ID" in result.content.text
+
+    def test_exec_command_rejects_unknown_sandbox_permissions(self) -> None:
+        tool = ExecCommandTool()
+        result = asyncio.run(
+            tool.execute(
+                {
+                    "cmd": "echo nope",
+                    "sandbox_permissions": "unknown",
+                }
+            )
+        )
+
+        assert isinstance(result.content, TextContent)
+        assert "sandbox_permissions must be" in result.content.text
+
+    def test_write_stdin_writes_to_tty_session(self) -> None:
+        if os.name == "nt":
+            import pytest
+
+            pytest.skip("PTY-backed write_stdin is only supported on POSIX")
+
+        exec_tool = ExecCommandTool()
+        write_tool = WriteStdinTool()
+        start = asyncio.run(
+            exec_tool.execute(
+                {
+                    "cmd": python_cmd(
+                        "import sys; "
+                        "print('ready', flush=True); "
+                        "line = sys.stdin.readline(); "
+                        "print('got:' + line.strip(), flush=True)"
+                    ),
+                    "shell": "/bin/sh",
+                    "login": False,
+                    "tty": True,
+                    "yield_time_ms": 250,
+                }
+            )
+        )
+
+        assert isinstance(start.content, TextContent)
+        assert "ready" in start.content.text
+        session_id = extract_session_id(start.content.text)
+        result = asyncio.run(
+            write_tool.execute(
+                {
+                    "session_id": session_id,
+                    "chars": "ping\n",
+                    "yield_time_ms": 250,
+                }
+            )
+        )
+
+        assert isinstance(result.content, TextContent)
+        assert "ready" not in result.content.text
+        assert "Process exited with code 0" in result.content.text
+        assert "got:ping" in result.content.text
+
+    def test_write_stdin_rejects_non_tty_session_input(self) -> None:
+        exec_tool = ExecCommandTool()
+        write_tool = WriteStdinTool()
+        start = asyncio.run(
+            exec_tool.execute(
+                {
+                    "cmd": python_cmd("import time; time.sleep(5)"),
+                    "shell": "/bin/sh",
+                    "login": False,
+                    "yield_time_ms": 250,
+                }
+            )
+        )
+
+        assert isinstance(start.content, TextContent)
+        session_id = extract_session_id(start.content.text)
+        result = asyncio.run(
+            write_tool.execute({"session_id": session_id, "chars": "hello\n"})
+        )
+
+        assert isinstance(result.content, TextContent)
+        assert "rerun exec_command with tty=true" in result.content.text
+
+
+class TestApplyPatchToolFunctional:
+    """Functional tests for the Codex-style apply_patch tool."""
+
+    def test_apply_patch_adds_and_updates_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            previous_cwd = os.getcwd()
+            os.chdir(temp_dir)
+            try:
+                tool = ApplyPatchTool()
+                result = asyncio.run(
+                    tool.execute(
+                        {
+                            "input": (
+                                "*** Begin Patch\n"
+                                "*** Add File: sample.txt\n"
+                                "+hello\n"
+                                "*** Update File: sample.txt\n"
+                                "@@\n"
+                                "-hello\n"
+                                "+hello world\n"
+                                "*** End Patch"
+                            )
+                        }
+                    )
+                )
+            finally:
+                os.chdir(previous_cwd)
+
+            assert isinstance(result.content, TextContent)
+            assert "A sample.txt" in result.content.text
+            assert "M sample.txt" in result.content.text
+            assert Path(temp_dir, "sample.txt").read_text() == "hello world\n"
+
+    def test_apply_patch_rejects_absolute_paths(self) -> None:
+        tool = ApplyPatchTool()
+        result = asyncio.run(
+            tool.execute(
+                {
+                    "input": (
+                        "*** Begin Patch\n"
+                        "*** Add File: /tmp/nope.txt\n"
+                        "+hello\n"
+                        "*** End Patch"
+                    )
+                }
+            )
+        )
+
+        assert isinstance(result.content, TextContent)
+        assert "absolute paths are not allowed" in result.content.text
+
+    def test_apply_patch_rejects_parent_paths_outside_cwd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir) / "cwd"
+            temp_path.mkdir()
+            outside_path = Path(temp_dir) / "outside.txt"
+
+            previous_cwd = os.getcwd()
+            os.chdir(temp_path)
+            try:
+                tool = ApplyPatchTool()
+                result = asyncio.run(
+                    tool.execute(
+                        {
+                            "input": (
+                                "*** Begin Patch\n"
+                                "*** Add File: ../outside.txt\n"
+                                "+hello\n"
+                                "*** End Patch"
+                            )
+                        }
+                    )
+                )
+            finally:
+                os.chdir(previous_cwd)
+
+            assert isinstance(result.content, TextContent)
+            assert "path escapes working directory" in result.content.text
+            assert not outside_path.exists()
+
+
+class TestViewImageToolFunctional:
+    """Functional tests for the Codex-style view_image tool."""
+
+    def test_view_image_returns_image_content(self) -> None:
+        png_data = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8"
+            "/x8AAwMCAO+/p9sAAAAASUVORK5CYII="
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "pixel.png"
+            image_path.write_bytes(png_data)
+
+            tool = ViewImageTool()
+            result = asyncio.run(
+                tool.execute({"path": str(image_path), "detail": "original"})
+            )
+
+        assert isinstance(result.content, ImageContent)
+        assert result.content.media_type == "image/png"
+        assert result.content.data
+
+    def test_view_image_rejects_unknown_detail(self) -> None:
+        tool = ViewImageTool()
+        result = asyncio.run(tool.execute({"path": "missing.png", "detail": "high"}))
+
+        assert isinstance(result.content, TextContent)
+        assert "only supports `original`" in result.content.text
 
 
 # =============================================================================

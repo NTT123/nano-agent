@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import dataclasses
+import os
 import shutil
+import signal
 import tempfile
 import time
 import types
@@ -473,6 +477,27 @@ def _maybe_truncate(
     return _truncate_text_content(content, tool_name, config)
 
 
+def _truncate_middle_chars(text: str, max_chars: int) -> str:
+    """Codex-style middle truncation: keep head and tail, mark removed middle.
+
+    Mirrors codex-rs ``truncate_middle_chars``: if ``text`` already fits within
+    ``max_chars``, returns it unchanged; otherwise returns
+    ``text[:left] + "…N chars truncated…" + text[-right:]`` where ``left`` and
+    ``right`` split ``max_chars`` evenly. The head and tail together stay
+    within ``max_chars`` (the marker is added on top of the budget, matching
+    the Rust implementation).
+    """
+    if not text or max_chars <= 0:
+        return text
+    if len(text) <= max_chars:
+        return text
+    left_budget = max_chars // 2
+    right_budget = max_chars - left_budget
+    removed = len(text) - max_chars
+    marker = f"…{removed} chars truncated…"
+    return text[:left_budget] + marker + text[-right_budget:]
+
+
 def _truncate_text_content(
     content: TextContent, tool_name: str, config: TruncationConfig
 ) -> TextContent:
@@ -480,26 +505,25 @@ def _truncate_text_content(
 
     Returns the original content if within limits, otherwise:
     1. Saves full output to temp file
-    2. Returns truncated content with notification footer
+    2. Returns codex-style middle-truncated content with notification footer
     """
     text = content.text
     line_count = text.count("\n") + 1
 
-    # Check if truncation is needed
     if len(text) <= config.max_chars and line_count <= config.max_lines:
-        return content  # No truncation needed
+        return content
 
-    # Save full output to temp file
     temp_path = _save_full_output(text, tool_name)
 
-    # Determine truncation method (prefer char limit for consistency)
-    if len(text) > config.max_chars:
-        truncated = text[: config.max_chars]
+    # When the line limit fires but the char limit doesn't, scale the char
+    # budget down proportionally so the truncated body actually shrinks.
+    if line_count > config.max_lines and len(text) <= config.max_chars:
+        char_budget = max(1, len(text) * config.max_lines // line_count)
     else:
-        # Truncate by lines
-        truncated = "\n".join(text.splitlines()[: config.max_lines])
+        char_budget = config.max_chars
 
-    # Build notification
+    truncated = _truncate_middle_chars(text, char_budget)
+
     notification = f"""
 
 ───── OUTPUT TRUNCATED ─────
@@ -572,6 +596,80 @@ def _format_size(size_bytes: int) -> str:
             return f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} TB"
+
+
+# Image media types forwarded to the model as ImageContent (others render as text).
+SUPPORTED_IMAGE_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/gif", "image/webp"}
+)
+# Cap raw image bytes — base64 inflates ~4/3, context window hates >~7MB payloads.
+IMAGE_MAX_BYTES = 5 * 1024 * 1024
+
+
+def load_image_as_content(
+    path: Path,
+    media_type: str,
+    *,
+    file_size: int | None = None,
+    oversize_hint: str = "",
+) -> ImageContent | TextContent:
+    """Read and base64-encode a local image file as an ImageContent block.
+
+    Returns TextContent with an ``Error: ...`` message if size exceeds the
+    limit or the file can't be read. Pass ``file_size`` if the caller has
+    already stat'd the file to avoid a second syscall.
+    """
+    try:
+        if file_size is None:
+            file_size = path.stat().st_size
+        if file_size > IMAGE_MAX_BYTES:
+            text = (
+                f"Error: Image {path} is {_format_size(file_size)}, "
+                f"exceeds the {_format_size(IMAGE_MAX_BYTES)} limit."
+            )
+            if oversize_hint:
+                text += f" {oversize_hint}"
+            return TextContent(text=text)
+        data = base64.standard_b64encode(path.read_bytes()).decode("ascii")
+        return ImageContent(data=data, media_type=media_type)
+    except PermissionError:
+        return TextContent(text=f"Error: permission denied reading image `{path}`")
+    except OSError as exc:
+        return TextContent(text=f"Error: unable to read image at `{path}`: {exc}")
+
+
+async def terminate_process(
+    process: asyncio.subprocess.Process,
+    *,
+    kill_group: bool = False,
+    timeout: float = 2.0,
+) -> None:
+    """Best-effort terminate a subprocess: SIGTERM, then SIGKILL after timeout.
+
+    Set ``kill_group=True`` (POSIX only) to signal the entire process group
+    via ``os.killpg``; the caller must have started the process with
+    ``start_new_session=True`` for this to be meaningful.
+    """
+    if process.returncode is not None:
+        return
+    use_group = kill_group and os.name != "nt"
+    try:
+        if use_group:
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+        await asyncio.wait_for(process.wait(), timeout=timeout)
+        return
+    except (asyncio.TimeoutError, ProcessLookupError, OSError):
+        pass
+    try:
+        if use_group:
+            os.killpg(process.pid, signal.SIGKILL)
+        else:
+            process.kill()
+    except (ProcessLookupError, OSError):
+        pass
+    await process.wait()
 
 
 # =============================================================================

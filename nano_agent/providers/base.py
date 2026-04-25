@@ -15,18 +15,22 @@ import httpx
 
 from ..dag import DAG
 from ..data_structures import (
+    APPROX_BYTES_PER_TOKEN,
     ImageContent,
     Message,
     Response,
     Role,
     TextContent,
     ToolResultContent,
+    approx_token_count,
 )
 
 __all__ = [
     "APIError",
     "APIClientMixin",
     "APIProtocol",
+    "APPROX_BYTES_PER_TOKEN",
+    "approx_token_count",
     "responses_tool_result_item",
     "responses_user_image_item",
 ]

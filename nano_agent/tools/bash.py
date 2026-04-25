@@ -8,7 +8,7 @@ from typing import Annotated
 
 from ..data_structures import TextContent
 from ..execution_context import ExecutionContext
-from .base import Desc, Tool
+from .base import Desc, Tool, terminate_process
 
 
 @dataclass
@@ -61,27 +61,11 @@ Usage notes:
             output = stdout.decode() or stderr.decode() or "(no output)"
             return TextContent(text=output)
         except asyncio.CancelledError:
-            # Terminate subprocess on cancellation
-            if process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
-            raise  # Re-raise to propagate cancellation
+            await terminate_process(process)
+            raise
         except asyncio.TimeoutError:
-            # Terminate subprocess on timeout
-            if process.returncode is None:
-                process.terminate()
-                try:
-                    await asyncio.wait_for(process.wait(), timeout=2.0)
-                except asyncio.TimeoutError:
-                    process.kill()
-                    await process.wait()
+            await terminate_process(process)
             return TextContent(text=f"Error: Command timed out after {input.timeout}s")
         except Exception as e:
-            # Clean up subprocess on any other error
-            if process.returncode is None:
-                process.terminate()
+            await terminate_process(process)
             return TextContent(text=f"Error: {e}")

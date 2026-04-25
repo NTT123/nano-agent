@@ -4,6 +4,7 @@ This package provides a collection of tools that can be used with the Claude API
 Each tool is in its own module for better organization and maintainability.
 """
 
+from .apply_patch import ApplyPatchInput, ApplyPatchTool
 from .ask_user_question import AskUserQuestionInput, AskUserQuestionTool
 from .base import (
     _DEFAULT_TRUNCATION_CONFIG,
@@ -28,10 +29,19 @@ from .base import (
     schema_from_dataclass,
 )
 from .bash import BashInput, BashTool
+from .delegate_task import DelegateTaskInput, DelegateTaskTool
+from .download_skill import DownloadSkillInput, DownloadSkillTool, Skill
 from .edit import (
     EditInput,
     EditTool,
     PermissionCallback,
+)
+from .exec_command import (
+    ExecCommandInput,
+    ExecCommandTool,
+    WriteStdinInput,
+    WriteStdinTool,
+    cleanup_exec_command_sessions,
 )
 from .glob import GlobInput, GlobTool
 from .grep import GrepInput, GrepTool
@@ -47,6 +57,7 @@ from .read import ReadInput, ReadTool
 from .stat import StatInput, StatTool
 from .tmux import TmuxInput, TmuxTool
 from .todo import Todo, TodoItemInput, TodoStatus, TodoWriteInput, TodoWriteTool
+from .view_image import ViewImageInput, ViewImageTool
 from .webfetch import WebFetchInput, WebFetchTool
 from .write import WriteInput, WriteTool
 
@@ -64,6 +75,27 @@ def get_default_tools() -> list[Tool]:
         StatTool(),
         EditTool(),
         WriteTool(),
+        WebFetchTool(),
+        TodoWriteTool(),
+        PythonTool(),
+        AskUserQuestionTool(),
+    ]
+
+
+def get_codex_tools() -> list[Tool]:
+    """Codex-style tool set, mirroring the codex-rs default tools.
+
+    Drops the Claude-flavored Bash/Read/Glob/Grep/Edit/Write tools in favor of
+    ``exec_command`` + ``write_stdin`` (shell), ``apply_patch`` (file edits),
+    and ``view_image`` (image input). Codex-trained models (gpt-5.x) drive
+    these via the canonical Codex schema and grammar.
+    """
+    return [
+        ExecCommandTool(),
+        WriteStdinTool(),
+        ApplyPatchTool(),
+        ViewImageTool(),
+        StatTool(),
         WebFetchTool(),
         TodoWriteTool(),
         PythonTool(),
@@ -97,6 +129,16 @@ __all__ = [
     # AskUserQuestion tool
     "AskUserQuestionTool",
     "AskUserQuestionInput",
+    # Codex-style apply_patch tool
+    "ApplyPatchTool",
+    "ApplyPatchInput",
+    # DownloadSkill tool
+    "DownloadSkillTool",
+    "DownloadSkillInput",
+    "Skill",
+    # DelegateTask tool
+    "DelegateTaskTool",
+    "DelegateTaskInput",
     # Bash tool
     "BashTool",
     "BashInput",
@@ -113,12 +155,21 @@ __all__ = [
     "EditTool",
     "EditInput",
     "PermissionCallback",
+    # Codex-style exec_command tool
+    "ExecCommandTool",
+    "ExecCommandInput",
+    "WriteStdinTool",
+    "WriteStdinInput",
+    "cleanup_exec_command_sessions",
     # Write tool
     "WriteTool",
     "WriteInput",
     # WebFetch tool
     "WebFetchTool",
     "WebFetchInput",
+    # Codex-style view_image tool
+    "ViewImageTool",
+    "ViewImageInput",
     # Stat tool
     "StatTool",
     "StatInput",
@@ -140,4 +191,6 @@ __all__ = [
     "TmuxInput",
     # Default tools function
     "get_default_tools",
+    # Codex-style tool set
+    "get_codex_tools",
 ]

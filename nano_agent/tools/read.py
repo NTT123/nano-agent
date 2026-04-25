@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import base64
 import mimetypes
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,15 +9,14 @@ from typing import Annotated, ClassVar
 
 from ..data_structures import ImageContent, TextContent
 from ..execution_context import ExecutionContext
-from .base import Desc, Tool, TruncationConfig, _format_size
-
-# Only these image types are forwarded to the model; others are read as text.
-_SUPPORTED_IMAGE_TYPES = frozenset(
-    {"image/png", "image/jpeg", "image/gif", "image/webp"}
+from .base import (
+    SUPPORTED_IMAGE_TYPES,
+    Desc,
+    Tool,
+    TruncationConfig,
+    _format_size,
+    load_image_as_content,
 )
-
-# Cap raw image bytes — base64 inflates ~4/3, context window hates >~7MB payloads.
-_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 
 
 @dataclass
@@ -41,6 +39,7 @@ Usage:
 - The file_path parameter must be an absolute path, not a relative path
 - Maximum 25 lines per read (use offset to paginate through larger files)
 - Output includes metadata: file path, size, total lines, range shown
+- This tool can read image files (PNG, JPEG, GIF, WebP). When reading an image, its contents are returned as an image block so you can see the image visually. Use this to view screenshots, diagrams, photos, or any image the user references.
 
 Workflow for large files:
 1. First read without offset to see file overview and metadata
@@ -51,8 +50,7 @@ Examples:
   ReadInput(file_path="/path/to/file.py")              # Lines 1-25
   ReadInput(file_path="/path/to/file.py", offset=100)  # Lines 101-125
   ReadInput(file_path="/path/to/file.py", offset=50, limit=10)  # Lines 51-60
-
-Note: For binary files (images, PDFs), content is processed differently."""
+  ReadInput(file_path="/path/to/screenshot.png")       # View an image"""
 
     # Constants for file reading
     MAX_LINES: ClassVar[int] = 25
@@ -81,17 +79,13 @@ Note: For binary files (images, PDFs), content is processed differently."""
             size_str = _format_size(file_size)
 
             guessed_type, _ = mimetypes.guess_type(path.name)
-            if guessed_type in _SUPPORTED_IMAGE_TYPES:
-                if file_size > _IMAGE_MAX_BYTES:
-                    return TextContent(
-                        text=(
-                            f"Error: Image {input.file_path} is {size_str}, "
-                            f"exceeds the {_format_size(_IMAGE_MAX_BYTES)} limit. "
-                            "Resize or crop before reading."
-                        )
-                    )
-                data = base64.standard_b64encode(path.read_bytes()).decode("ascii")
-                return ImageContent(data=data, media_type=guessed_type)
+            if guessed_type in SUPPORTED_IMAGE_TYPES:
+                return load_image_as_content(
+                    path,
+                    guessed_type,
+                    file_size=file_size,
+                    oversize_hint="Resize or crop before reading.",
+                )
 
             # Read content
             content = path.read_text()
