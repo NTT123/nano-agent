@@ -43,7 +43,7 @@ from .bot_config import (
     get_bot_provider,
     maybe_discover_context_window,
 )
-from .bot_skills import DOWNLOAD_SKILL_PROMPT_SENTENCE
+from .bot_skills import CODEX_DELEGATE_PROMPT_SENTENCE, DOWNLOAD_SKILL_PROMPT_SENTENCE
 from .bot_state import BotState, chunk_message, truncate
 from .slack_tools import (
     SLACK_MESSAGE_LIMIT,
@@ -97,6 +97,7 @@ _BASE_SYSTEM_PROMPT = (
     "Slack markdown is mrkdwn flavor: *bold*, _italic_, `code`, ```block```, "
     ">quote. Tables are not supported; use code blocks with aligned columns. "
     + DOWNLOAD_SKILL_PROMPT_SENTENCE
+    + CODEX_DELEGATE_PROMPT_SENTENCE
 )
 
 _CLAUDE_TOOLING_SUMMARY = (

@@ -29,7 +29,6 @@ from .base import (
     schema_from_dataclass,
 )
 from .bash import BashInput, BashTool
-from .delegate_task import DelegateTaskInput, DelegateTaskTool
 from .download_skill import DownloadSkillInput, DownloadSkillTool, Skill
 from .edit import (
     EditInput,
@@ -136,9 +135,6 @@ __all__ = [
     "DownloadSkillTool",
     "DownloadSkillInput",
     "Skill",
-    # DelegateTask tool
-    "DelegateTaskTool",
-    "DelegateTaskInput",
     # Bash tool
     "BashTool",
     "BashInput",

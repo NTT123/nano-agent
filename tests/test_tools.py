@@ -3,7 +3,6 @@ import base64
 import os
 import re
 import shlex
-import stat
 import sys
 from typing import cast
 
@@ -12,7 +11,6 @@ import pytest
 from nano_agent.tools import (
     ApplyPatchTool,
     BashTool,
-    DelegateTaskTool,
     DownloadSkillTool,
     EditTool,
     ExecCommandTool,
@@ -385,110 +383,6 @@ class TestDownloadSkillTool:
     def test_description_argument_is_rejected(self) -> None:
         with pytest.raises(TypeError):
             DownloadSkillTool(description="custom")  # type: ignore[call-arg]
-
-
-class FakeCodex:
-    """Helper that writes an executable shell script to a tmp dir on PATH."""
-
-    def __init__(self, script_path: "os.PathLike[str]") -> None:
-        self.script_path = script_path
-
-    def set_script(self, body: str) -> None:
-        from pathlib import Path
-
-        path = Path(self.script_path)
-        path.write_text(body)
-        path.chmod(path.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
-
-
-@pytest.fixture
-def fake_codex(tmp_path, monkeypatch):  # type: ignore[no-untyped-def]
-    """Provide a stand-in `codex` binary on PATH; tests fill in its body."""
-    monkeypatch.setenv("PATH", f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
-    return FakeCodex(tmp_path / "codex")
-
-
-class TestDelegateTaskTool:
-    def test_default_values(self) -> None:
-        tool = DelegateTaskTool()
-        assert tool.name == "DelegateTask"
-        assert "Delegate a task" in tool.description
-
-    def test_input_schema_has_required_fields(self) -> None:
-        tool = DelegateTaskTool()
-        schema = tool.input_schema
-        props = get_properties(schema)
-        assert "prompt" in props
-        assert "model" in props
-        assert "sandbox" in props
-        assert "cwd" in props
-        assert "timeout" in props
-        assert schema["required"] == ["prompt"]
-
-    def test_empty_prompt_returns_error(self) -> None:
-        tool = DelegateTaskTool()
-        result = asyncio.run(tool.execute({"prompt": "   "}))
-        assert isinstance(result.content, TextContent)
-        assert "prompt is required" in result.content.text
-
-    def test_invalid_sandbox_returns_error(self) -> None:
-        tool = DelegateTaskTool()
-        result = asyncio.run(tool.execute({"prompt": "do x", "sandbox": "wide-open"}))
-        assert isinstance(result.content, TextContent)
-        assert "invalid sandbox" in result.content.text
-
-    def test_missing_codex_returns_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("shutil.which", lambda _name: None)
-        tool = DelegateTaskTool()
-        result = asyncio.run(tool.execute({"prompt": "anything"}))
-        assert isinstance(result.content, TextContent)
-        assert "codex CLI not found" in result.content.text
-
-    def test_successful_execution(self, fake_codex: "FakeCodex") -> None:
-        fake_codex.set_script(
-            "#!/bin/sh\n" 'echo "ARGS: $*"\n' "echo SUB_AGENT_OUTPUT\n"
-        )
-        tool = DelegateTaskTool()
-        result = asyncio.run(
-            tool.execute(
-                {
-                    "prompt": "Research X",
-                    "model": "gpt-5",
-                    "sandbox": "read-only",
-                }
-            )
-        )
-        assert isinstance(result.content, TextContent)
-        text = result.content.text
-        assert "SUB_AGENT_OUTPUT" in text
-        assert "exec" in text
-        assert "--model gpt-5" in text
-        assert "--sandbox read-only" in text
-        assert "--skip-git-repo-check" in text
-        assert "Research X" in text
-
-    def test_failure_exit_code_returns_error(self, fake_codex: "FakeCodex") -> None:
-        fake_codex.set_script("#!/bin/sh\n" "echo 'something broke' >&2\n" "exit 2\n")
-        tool = DelegateTaskTool()
-        result = asyncio.run(tool.execute({"prompt": "anything"}))
-        assert isinstance(result.content, TextContent)
-        assert "exit" in result.content.text.lower()
-        assert "code 2" in result.content.text
-        assert "something broke" in result.content.text
-
-    def test_passes_cwd_when_set(self, fake_codex: "FakeCodex") -> None:
-        fake_codex.set_script('#!/bin/sh\necho "ARGS: $*"\n')
-        tool = DelegateTaskTool()
-        result = asyncio.run(
-            tool.execute(
-                {
-                    "prompt": "p",
-                    "cwd": "/tmp/work",
-                }
-            )
-        )
-        assert isinstance(result.content, TextContent)
-        assert "--cd /tmp/work" in result.content.text
 
 
 class TestStatTool:

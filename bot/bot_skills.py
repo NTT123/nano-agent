@@ -7,15 +7,23 @@ descriptions so the model knows when to fetch one.
 
 from __future__ import annotations
 
-import shutil
-
-from nano_agent.tools import DelegateTaskTool, DownloadSkillTool, Skill
+from nano_agent.tools import DownloadSkillTool, Skill
 from nano_agent.tools.base import Tool
 
 DOWNLOAD_SKILL_PROMPT_SENTENCE = (
     "When the user's request matches one of the skills listed in the "
     "DownloadSkill tool description, call DownloadSkill first to fetch the "
-    "playbook for that skill, then follow it."
+    "playbook for that skill, then follow it. "
+)
+
+CODEX_DELEGATE_PROMPT_SENTENCE = (
+    "You can delegate research, analysis, or implementation work to a fresh "
+    "sub-agent by running `codex exec '<full task prompt>'` in the shell — "
+    "for example, `codex exec 'check the current weather in SG'`. The "
+    "sub-agent has no context from this conversation, so include all relevant "
+    "background, file paths, and the expected output format in the prompt. "
+    "Run `codex exec --help` for available flags (e.g. `--model`, `--sandbox`, "
+    "`--cd`)."
 )
 
 ONBOARD_ML_PROJECT_KNOWLEDGE = """\
@@ -129,12 +137,5 @@ def get_bot_skills() -> list[Skill]:
 
 
 def get_bot_skill_tools() -> list[Tool]:
-    """Tools that surface skills + Codex delegation, shared across frontends.
-
-    DelegateTaskTool is omitted when the codex CLI isn't on PATH so the model
-    doesn't see a tool it can't actually use.
-    """
-    tools: list[Tool] = [DownloadSkillTool(skills=get_bot_skills())]
-    if shutil.which("codex"):
-        tools.append(DelegateTaskTool())
-    return tools
+    """Tools that surface skills, shared across frontends."""
+    return [DownloadSkillTool(skills=get_bot_skills())]

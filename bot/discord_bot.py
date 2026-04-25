@@ -31,7 +31,7 @@ from .bot_config import (
     get_bot_provider,
     maybe_discover_context_window,
 )
-from .bot_skills import DOWNLOAD_SKILL_PROMPT_SENTENCE
+from .bot_skills import CODEX_DELEGATE_PROMPT_SENTENCE, DOWNLOAD_SKILL_PROMPT_SENTENCE
 from .bot_state import BotState, chunk_message, truncate
 from .bot_tools import build_discord_explore_payload, get_discord_tools
 
@@ -58,6 +58,7 @@ SYSTEM_PROMPT = (
     "Discord does NOT support markdown tables. For tabular data, "
     "use code blocks (```text) with monospace-aligned columns instead. "
     + DOWNLOAD_SKILL_PROMPT_SENTENCE
+    + CODEX_DELEGATE_PROMPT_SENTENCE
 )
 
 RESPOND_TO_ALL_MESSAGES = os.getenv(
