@@ -8,6 +8,7 @@ flow. This module owns that logic so the frontends stay thin.
 from __future__ import annotations
 
 import os
+from typing import get_args
 
 from nano_agent import ClaudeCodeAPI, CodexAPI
 from nano_agent.providers import DEFAULT_CODEX_AUTH_PATH
@@ -22,23 +23,11 @@ def get_codex_model() -> str:
     return os.getenv("CODEX_MODEL", "gpt-5.5")
 
 
-_VALID_CODEX_REASONING_EFFORTS = (
-    "none",
-    "minimal",
-    "low",
-    "medium",
-    "high",
-    "xhigh",
-)
-
-
 def get_codex_reasoning_effort() -> ReasoningEffort:
+    valid = get_args(ReasoningEffort)
     raw = os.getenv("CODEX_REASONING_EFFORT", "high").strip().lower()
-    if raw not in _VALID_CODEX_REASONING_EFFORTS:
-        raise ValueError(
-            f"CODEX_REASONING_EFFORT must be one of "
-            f"{_VALID_CODEX_REASONING_EFFORTS} (got {raw!r})"
-        )
+    if raw not in valid:
+        raise ValueError(f"CODEX_REASONING_EFFORT must be one of {valid} (got {raw!r})")
     return raw  # type: ignore[return-value]
 
 

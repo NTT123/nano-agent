@@ -21,7 +21,6 @@ from ..data_structures import (
     ThinkingContent,
     ToolResultContent,
     ToolUseContent,
-    Usage,
 )
 from ..tools import Tool
 from .base import (
@@ -31,9 +30,12 @@ from .base import (
     build_httpx_timeout,
     build_reasoning_block,
     consume_responses_sse_stream,
+    flush_text_parts,
     force_required_all,
+    map_responses_status_to_stop_reason,
     parse_tool_arguments,
     responses_tool_result_item,
+    responses_usage_from_dict,
     responses_user_image_item,
     serialize_tool_arguments,
     unpack_dag_or_args,
@@ -139,86 +141,43 @@ class OpenAIAPI:
         text_type = "input_text" if msg.role == Role.USER else "output_text"
 
         if isinstance(msg.content, str):
-            # Simple string content
             items.append(
                 {
                     "role": msg.role.value,
                     "content": [{"type": text_type, "text": msg.content}],
                 }
             )
-        else:
-            # List of content blocks - collect text and handle tools separately
-            text_parts: list[str] = []
-            for block in msg.content:
-                if isinstance(block, TextContent):
-                    text_parts.append(block.text)
-                elif isinstance(block, ThinkingContent):
-                    # Only replay reasoning blocks that have encrypted_content
-                    # (Responses API form). Skip Claude-style ``thinking`` blocks
-                    # since the Responses API rejects that shape.
-                    if include_reasoning and block.encrypted_content:
-                        # Flush any accumulated text first
-                        if text_parts:
-                            items.append(
-                                {
-                                    "role": msg.role.value,
-                                    "content": [
-                                        {
-                                            "type": text_type,
-                                            "text": "\n".join(text_parts),
-                                        }
-                                    ],
-                                }
-                            )
-                            text_parts = []
-                        # Pass reasoning block through for multi-turn conversations
-                        items.append(dict(block.to_dict()))
-                elif isinstance(block, ToolUseContent):
-                    # Flush any accumulated text first
-                    if text_parts:
-                        items.append(
-                            {
-                                "role": msg.role.value,
-                                "content": [
-                                    {"type": text_type, "text": "\n".join(text_parts)}
-                                ],
-                            }
-                        )
-                        text_parts = []
-                    # Assistant's tool call
-                    func_call: dict[str, Any] = {
-                        "type": "function_call",
-                        "call_id": block.id,
-                        "name": block.name,
-                        "arguments": serialize_tool_arguments(block.input),
-                    }
-                    # Include item_id if present (required for OpenAI multi-turn)
-                    if block.item_id:
-                        func_call["id"] = block.item_id
-                    items.append(func_call)
-                elif isinstance(block, ToolResultContent):
-                    items.append(responses_tool_result_item(block))
-                elif isinstance(block, ImageContent):
-                    if text_parts:
-                        items.append(
-                            {
-                                "role": msg.role.value,
-                                "content": [
-                                    {"type": text_type, "text": "\n".join(text_parts)}
-                                ],
-                            }
-                        )
-                        text_parts = []
-                    items.append(responses_user_image_item(msg, block))
+            return items
 
-            if text_parts:
-                items.append(
-                    {
-                        "role": msg.role.value,
-                        "content": [{"type": text_type, "text": "\n".join(text_parts)}],
-                    }
-                )
+        text_parts: list[str] = []
+        for block in msg.content:
+            if isinstance(block, TextContent):
+                text_parts.append(block.text)
+            elif isinstance(block, ThinkingContent):
+                # Only replay reasoning blocks that have encrypted_content
+                # (Responses API form). Skip Claude-style ``thinking`` blocks
+                # since the Responses API rejects that shape.
+                if include_reasoning and block.encrypted_content:
+                    flush_text_parts(items, msg.role.value, text_type, text_parts)
+                    items.append(dict(block.to_dict()))
+            elif isinstance(block, ToolUseContent):
+                flush_text_parts(items, msg.role.value, text_type, text_parts)
+                func_call: dict[str, Any] = {
+                    "type": "function_call",
+                    "call_id": block.id,
+                    "name": block.name,
+                    "arguments": serialize_tool_arguments(block.input),
+                }
+                if block.item_id:
+                    func_call["id"] = block.item_id
+                items.append(func_call)
+            elif isinstance(block, ToolResultContent):
+                items.append(responses_tool_result_item(block))
+            elif isinstance(block, ImageContent):
+                flush_text_parts(items, msg.role.value, text_type, text_parts)
+                items.append(responses_user_image_item(msg, block))
 
+        flush_text_parts(items, msg.role.value, text_type, text_parts)
         return items
 
     def _convert_tool_to_openai(self, tool: Tool) -> dict[str, Any]:
@@ -292,23 +251,10 @@ class OpenAIAPI:
                     )
                 )
 
-        # Parse usage
-        usage_data = data.get("usage", {})
-        input_details = usage_data.get("input_tokens_details", {})
-        output_details = usage_data.get("output_tokens_details", {})
-        usage = Usage(
-            input_tokens=usage_data.get("input_tokens", 0),
-            output_tokens=usage_data.get("output_tokens", 0),
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-            reasoning_tokens=output_details.get("reasoning_tokens", 0),
-            cached_tokens=input_details.get("cached_tokens", 0),
-            total_tokens=usage_data.get("total_tokens", 0),
-        )
+        usage = responses_usage_from_dict(data.get("usage"))
 
-        # Determine stop reason from status
         status = data.get("status", "")
-        stop_reason = _map_status_to_stop_reason(status)
+        stop_reason = map_responses_status_to_stop_reason(status)
 
         return Response(
             id=data.get("id", ""),
@@ -436,14 +382,3 @@ def _raise_openai_http_error(status_code: int, body: bytes) -> None:
         if error is not None:
             raise RuntimeError(f"OpenAI API error: {error}")
     raise RuntimeError(f"OpenAI API HTTP {status_code}: {payload!r}")
-
-
-def _map_status_to_stop_reason(status: str) -> str | None:
-    """Map OpenAI response status to Claude-style stop reason."""
-    status_map = {
-        "completed": "end_turn",
-        "failed": "error",
-        "incomplete": "max_tokens",
-        "in_progress": None,
-    }
-    return status_map.get(status, status)

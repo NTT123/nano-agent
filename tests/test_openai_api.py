@@ -19,27 +19,9 @@ from nano_agent import (
 )
 from nano_agent.providers.openai import (
     OpenAIAPI,
-    _map_status_to_stop_reason,
     _raise_openai_http_error,
 )
 from nano_agent.tools import Tool
-
-
-class TestMapStatusToStopReason:
-    def test_completed(self) -> None:
-        assert _map_status_to_stop_reason("completed") == "end_turn"
-
-    def test_failed(self) -> None:
-        assert _map_status_to_stop_reason("failed") == "error"
-
-    def test_incomplete(self) -> None:
-        assert _map_status_to_stop_reason("incomplete") == "max_tokens"
-
-    def test_in_progress(self) -> None:
-        assert _map_status_to_stop_reason("in_progress") is None
-
-    def test_unknown(self) -> None:
-        assert _map_status_to_stop_reason("unknown_status") == "unknown_status"
 
 
 class TestOpenAIAPIInit:

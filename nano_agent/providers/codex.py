@@ -25,7 +25,6 @@ from ..data_structures import (
     ThinkingContent,
     ToolResultContent,
     ToolUseContent,
-    Usage,
 )
 from ..tools import Tool
 from .base import (
@@ -35,11 +34,14 @@ from .base import (
     build_httpx_timeout,
     build_reasoning_block,
     consume_responses_sse_stream,
+    flush_text_parts,
     force_required_all,
     is_context_window_error_payload,
+    map_responses_status_to_stop_reason,
     parse_responses_sse_text,
     parse_tool_arguments,
     responses_tool_result_item,
+    responses_usage_from_dict,
     responses_user_image_item,
     serialize_tool_arguments,
     unpack_dag_or_args,
@@ -207,10 +209,10 @@ class CodexAPI:
                 # (Responses API form). Skip Claude-style ``thinking`` blocks
                 # since the Responses API rejects that shape.
                 if self.reasoning and block.encrypted_content:
-                    _flush_text_parts(items, msg.role.value, text_type, text_parts)
+                    flush_text_parts(items, msg.role.value, text_type, text_parts)
                     items.append(dict(block.to_dict()))
             elif isinstance(block, ToolUseContent):
-                _flush_text_parts(items, msg.role.value, text_type, text_parts)
+                flush_text_parts(items, msg.role.value, text_type, text_parts)
                 items.append(
                     {
                         "type": "function_call",
@@ -222,13 +224,13 @@ class CodexAPI:
             elif isinstance(block, ToolResultContent):
                 items.append(responses_tool_result_item(block))
             elif isinstance(block, ImageContent):
-                _flush_text_parts(items, msg.role.value, text_type, text_parts)
+                flush_text_parts(items, msg.role.value, text_type, text_parts)
                 items.append(responses_user_image_item(msg, block))
             elif isinstance(block, CompactionContent):
-                _flush_text_parts(items, msg.role.value, text_type, text_parts)
+                flush_text_parts(items, msg.role.value, text_type, text_parts)
                 items.append(dict(block.to_dict()))
 
-        _flush_text_parts(items, msg.role.value, text_type, text_parts)
+        flush_text_parts(items, msg.role.value, text_type, text_parts)
         return items
 
     def _convert_tool_to_codex(self, tool: Tool) -> dict[str, Any]:
@@ -687,21 +689,10 @@ class CodexAPI:
                     )
                 )
 
-        usage_data = data.get("usage", {})
-        input_details = usage_data.get("input_tokens_details", {})
-        output_details = usage_data.get("output_tokens_details", {})
-        usage = Usage(
-            input_tokens=usage_data.get("input_tokens", 0),
-            output_tokens=usage_data.get("output_tokens", 0),
-            cache_creation_input_tokens=0,
-            cache_read_input_tokens=0,
-            reasoning_tokens=output_details.get("reasoning_tokens", 0),
-            cached_tokens=input_details.get("cached_tokens", 0),
-            total_tokens=usage_data.get("total_tokens", 0),
-        )
+        usage = responses_usage_from_dict(data.get("usage"))
 
         status = data.get("status", "")
-        stop_reason = _map_status_to_stop_reason(status)
+        stop_reason = map_responses_status_to_stop_reason(status)
 
         return Response(
             id=data.get("id", ""),
@@ -736,29 +727,6 @@ def _rebuild_dag(
         elif msg.role == Role.ASSISTANT:
             new_dag = new_dag.assistant(msg.content)
     return new_dag
-
-
-def _flush_text_parts(
-    items: list[dict[str, Any]],
-    role: str,
-    text_type: str,
-    text_parts: list[str],
-) -> None:
-    """Append the accumulated ``text_parts`` as a single message item and clear
-    them in place. No-op when nothing is pending.
-
-    Used between non-text blocks (tool calls, reasoning, images, compaction)
-    to preserve the original block ordering at the wire level.
-    """
-    if not text_parts:
-        return
-    items.append(
-        {
-            "role": role,
-            "content": [{"type": text_type, "text": "\n".join(text_parts)}],
-        }
-    )
-    text_parts.clear()
 
 
 def _should_keep_compacted_history_item(item: dict[str, Any]) -> bool:
@@ -867,13 +835,3 @@ def _resolve_codex_installation_id(codex_home: Path) -> str:
         # remains stable for this client instance via ``self._installation_id``.
         pass
     return installation_id
-
-
-def _map_status_to_stop_reason(status: str) -> str | None:
-    status_map = {
-        "completed": "end_turn",
-        "failed": "error",
-        "incomplete": "max_tokens",
-        "in_progress": None,
-    }
-    return status_map.get(status, status)

@@ -32,7 +32,7 @@ from .bot_config import (
     maybe_discover_context_window,
 )
 from .bot_skills import CODEX_DELEGATE_PROMPT_SENTENCE, DOWNLOAD_SKILL_PROMPT_SENTENCE
-from .bot_state import BotState, chunk_message, truncate
+from .bot_state import BotState, chunk_message, format_user_mention, truncate
 from .bot_tools import build_discord_explore_payload, get_discord_tools
 
 load_dotenv()
@@ -326,8 +326,9 @@ async def on_message(message: discord.Message) -> None:
 
     content = message.content
     if bot.user is not None:
-        content = content.replace(f"<@{bot.user.id}>", "").strip()
-        content = content.replace(f"<@!{bot.user.id}>", "").strip()
+        bot_id = str(bot.user.id)
+        content = content.replace(format_user_mention(bot_id), "").strip()
+        content = content.replace(f"<@!{bot_id}>", "").strip()
 
     if not content and message.attachments:
         content = "(message had only attachments)"

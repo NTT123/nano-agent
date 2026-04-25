@@ -12,7 +12,7 @@ import copy
 import json
 from collections.abc import AsyncIterator, Sequence
 from types import TracebackType
-from typing import Any, Literal, Protocol, Self
+from typing import Any, Literal, Self
 
 ReasoningEffort = Literal["none", "minimal", "low", "medium", "high", "xhigh"]
 ReasoningSummary = Literal["concise", "detailed", "auto"]
@@ -28,8 +28,10 @@ from ..data_structures import (
     Role,
     TextContent,
     ToolResultContent,
+    Usage,
     approx_token_count,
 )
+from ..protocols import APIProtocol
 from ..tools.base import Tool
 
 __all__ = [
@@ -47,12 +49,15 @@ __all__ = [
     "build_httpx_timeout",
     "build_reasoning_block",
     "consume_responses_sse_stream",
+    "flush_text_parts",
     "force_required_all",
     "is_context_window_error_payload",
+    "map_responses_status_to_stop_reason",
     "parse_responses_sse_text",
     "parse_tool_arguments",
     "raise_for_stream_event_error",
     "responses_tool_result_item",
+    "responses_usage_from_dict",
     "responses_user_image_item",
     "serialize_tool_arguments",
     "unpack_dag_or_args",
@@ -341,6 +346,80 @@ def responses_tool_result_item(block: ToolResultContent) -> dict[str, Any]:
     }
 
 
+_RESPONSES_STATUS_STOP_REASONS: dict[str, str | None] = {
+    "completed": "end_turn",
+    "failed": "error",
+    "incomplete": "max_tokens",
+    "in_progress": None,
+}
+
+
+def map_responses_status_to_stop_reason(status: str) -> str | None:
+    """Map a Responses-API ``status`` field to a Claude-style stop reason.
+
+    Unknown statuses pass through verbatim so callers can still surface the
+    backend's wire value rather than silently dropping it.
+    """
+    if status in _RESPONSES_STATUS_STOP_REASONS:
+        return _RESPONSES_STATUS_STOP_REASONS[status]
+    return status or None
+
+
+def flush_text_parts(
+    items: list[dict[str, Any]],
+    role: str,
+    text_type: str,
+    text_parts: list[str],
+) -> None:
+    """Append accumulated ``text_parts`` as a single message item, then clear
+    them in place. No-op when nothing is pending.
+
+    Used between non-text blocks (tool calls, reasoning, images, compaction)
+    in Responses-API message conversion to preserve the original block
+    ordering at the wire level.
+    """
+    if not text_parts:
+        return
+    items.append(
+        {
+            "role": role,
+            "content": [{"type": text_type, "text": "\n".join(text_parts)}],
+        }
+    )
+    text_parts.clear()
+
+
+def responses_usage_from_dict(usage_data: Any) -> Usage:
+    """Build a :class:`Usage` from a Responses-API ``usage`` payload.
+
+    Reads ``input_tokens_details.cached_tokens`` and
+    ``output_tokens_details.reasoning_tokens`` — the OpenAI/Codex Responses
+    fields. ``cache_creation_input_tokens`` / ``cache_read_input_tokens``
+    are Anthropic-specific and stay 0 here.
+    """
+    if not isinstance(usage_data, dict):
+        usage_data = {}
+    input_details = usage_data.get("input_tokens_details") or {}
+    output_details = usage_data.get("output_tokens_details") or {}
+    return Usage(
+        input_tokens=usage_data.get("input_tokens", 0),
+        output_tokens=usage_data.get("output_tokens", 0),
+        cache_creation_input_tokens=0,
+        cache_read_input_tokens=0,
+        reasoning_tokens=(
+            output_details.get("reasoning_tokens", 0)
+            if isinstance(output_details, dict)
+            else 0
+        ),
+        cached_tokens=(
+            input_details.get("cached_tokens", 0)
+            if isinstance(input_details, dict)
+            else 0
+        ),
+        total_tokens=usage_data.get("total_tokens", 0),
+    )
+
+
 def responses_user_image_item(msg: Message, image: ImageContent) -> dict[str, Any]:
     """Build a user-role message item containing an ``input_image`` block.
 
@@ -439,31 +518,6 @@ def is_context_window_error_payload(error: Any) -> bool:
     (typically a dict with ``code``, ``message``, ``type``).
     """
     return isinstance(error, dict) and error.get("code") == CONTEXT_LENGTH_EXCEEDED_CODE
-
-
-class APIProtocol(Protocol):
-    """Protocol defining the interface for all API clients.
-
-    All API clients (ClaudeAPI, ClaudeCodeAPI, OpenAIAPI, GeminiAPI) must
-    implement this protocol to be usable with the executor.
-
-    Example:
-        >>> async def my_function(api: APIProtocol, dag: DAG) -> Response:
-        ...     return await api.send(dag)
-    """
-
-    _client: httpx.AsyncClient
-
-    async def send(self, dag: "DAG") -> "Response":
-        """Send a request to the API.
-
-        Args:
-            dag: The conversation DAG to send
-
-        Returns:
-            Response from the API
-        """
-        ...
 
 
 class APIClientMixin:

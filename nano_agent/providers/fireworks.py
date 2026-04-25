@@ -23,7 +23,7 @@ from ..data_structures import (
     Usage,
 )
 from ..tools import Tool
-from .base import APIError, unpack_dag_or_args
+from .base import APIError, map_responses_status_to_stop_reason, unpack_dag_or_args
 
 __all__ = ["FireworksAPI"]
 
@@ -245,9 +245,8 @@ class FireworksAPI:
             cache_read_input_tokens=0,
         )
 
-        # Determine stop reason from status
         status = data.get("status", "")
-        stop_reason = _map_status_to_stop_reason(status)
+        stop_reason = map_responses_status_to_stop_reason(status)
 
         return Response(
             id=data.get("id", ""),
@@ -474,14 +473,3 @@ def _parse_arguments(arguments: str) -> dict[str, Any]:
         return result if isinstance(result, dict) else {}
     except json.JSONDecodeError:
         return {}
-
-
-def _map_status_to_stop_reason(status: str) -> str | None:
-    """Map Fireworks response status to Claude-style stop reason."""
-    status_map = {
-        "completed": "end_turn",
-        "failed": "error",
-        "incomplete": "max_tokens",
-        "in_progress": None,
-    }
-    return status_map.get(status, status)

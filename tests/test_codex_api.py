@@ -21,26 +21,8 @@ from nano_agent.data_structures import parse_content_block
 from nano_agent.providers.codex import (
     CodexAPI,
     _convert_compacted_output_to_messages,
-    _map_status_to_stop_reason,
 )
 from nano_agent.tools import Desc, Tool
-
-
-class TestMapStatusToStopReason:
-    def test_completed(self) -> None:
-        assert _map_status_to_stop_reason("completed") == "end_turn"
-
-    def test_failed(self) -> None:
-        assert _map_status_to_stop_reason("failed") == "error"
-
-    def test_incomplete(self) -> None:
-        assert _map_status_to_stop_reason("incomplete") == "max_tokens"
-
-    def test_in_progress(self) -> None:
-        assert _map_status_to_stop_reason("in_progress") is None
-
-    def test_unknown(self) -> None:
-        assert _map_status_to_stop_reason("unknown_status") == "unknown_status"
 
 
 class TestCodexAPIInit:

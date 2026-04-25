@@ -12,11 +12,9 @@ import tempfile
 import time
 import types
 import uuid
-from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import (
-    TYPE_CHECKING,
     Annotated,
     Any,
     ClassVar,
@@ -28,9 +26,7 @@ from typing import (
 )
 
 from ..data_structures import ImageContent, SubGraph, TextContent
-
-if TYPE_CHECKING:
-    from ..execution_context import ExecutionContext
+from ..execution_context import ExecutionContext
 
 
 # =============================================================================
@@ -683,6 +679,14 @@ class ToolDict(TypedDict):
     input_schema: InputSchemaDict
 
 
+_EMPTY_INPUT_SCHEMA: InputSchemaDict = {
+    "type": "object",
+    "properties": {},
+    "required": [],
+    "additionalProperties": False,
+}
+
+
 @dataclass
 class Tool:
     """Base class for all tools with automatic schema inference.
@@ -715,6 +719,8 @@ class Tool:
     _input_type: ClassVar[type | None] = None
     _inferred_schema: ClassVar[InputSchemaDict | None] = None
     _no_input: ClassVar[bool] = False  # True if __call__ has no input parameter
+    # Detected via signature inspection to avoid an isinstance coupling to SubAgentTool.
+    _takes_execution_context: ClassVar[bool] = False
     # Truncation config - override in subclasses to customize or disable
     _truncation_config: ClassVar[TruncationConfig | None] = None
     # Required CLI commands - override in subclasses that need external CLI tools
@@ -754,6 +760,7 @@ class Tool:
             input_type = get_call_input_type(cls)
             cls._input_type = input_type
             cls._no_input = not has_input_param  # True if no input parameter
+            cls._takes_execution_context = "execution_context" in sig.parameters
 
             if input_type is not None:
                 cls._inferred_schema = schema_from_dataclass(input_type)
@@ -772,16 +779,16 @@ class Tool:
 
     @property
     def input_schema(self) -> InputSchemaDict:
-        """Get the input schema (inferred from __call__ type annotation)."""
+        """Get the input schema (inferred from __call__ type annotation).
+
+        Returns a shared module-level singleton when no schema was inferred.
+        ``providers.base.force_required_all`` memoizes by ``id(schema)``;
+        returning a fresh dict here would defeat that cache and grow it
+        unboundedly across send() calls in long-running clients.
+        """
         if self._inferred_schema is not None:
             return self._inferred_schema
-        # Fallback for tools that don't use type annotations
-        return {
-            "type": "object",
-            "properties": {},
-            "required": [],
-            "additionalProperties": False,
-        }
+        return _EMPTY_INPUT_SCHEMA
 
     def to_dict(self) -> ToolDict:
         return {
@@ -801,7 +808,9 @@ class Tool:
         It handles:
         1. Conversion from raw API dict to typed input
         2. Automatic truncation of large outputs (saves full output to temp file)
-        3. Passing ExecutionContext to SubAgentTool.__call__
+        3. Passing ExecutionContext to tools whose __call__ accepts it
+           (detected via signature inspection; SubAgentTool subclasses opt
+           in this way)
 
         Args:
             input: Raw input dict from API (will be converted to typed dataclass)
@@ -818,13 +827,13 @@ class Tool:
         )
         if self._no_input:
             # No-input tool: call without arguments
-            if isinstance(self, SubAgentTool):
+            if self._takes_execution_context:
                 result = await self.__call__(execution_context=execution_context)  # type: ignore[call-arg]
             else:
                 result = await self.__call__()  # type: ignore[call-arg]
         else:
             typed_input = convert_input(input, self._input_type)
-            if isinstance(self, SubAgentTool):
+            if self._takes_execution_context:
                 result = await self.__call__(
                     typed_input, execution_context=execution_context
                 )
@@ -864,103 +873,3 @@ class Tool:
         SubAgentTool implementations should use execution_context for spawning.
         """
         raise NotImplementedError(f"{self.name} does not implement __call__()")
-
-
-# =============================================================================
-# Sub-Agent Tool Base Class
-# =============================================================================
-
-
-@dataclass
-class SubAgentTool(Tool):
-    """Base class for tools that spawn sub-agents (pure functional).
-
-    This class provides a `spawn()` helper that handles the boilerplate of
-    running sub-agents. Unlike the old mutation-based design, this is pure
-    functional - the execution context is passed as a parameter to __call__,
-    and spawn() returns both the summary and the SubGraph.
-
-    Example:
-        @dataclass
-        class SecurityAuditInput:
-            file_path: Annotated[str, Desc("Path to the file to audit")]
-
-        @dataclass
-        class SecurityAuditTool(SubAgentTool):
-            name: str = "SecurityAudit"
-            description: str = "Spawn a sub-agent to audit code for security issues"
-
-            async def __call__(
-                self,
-                input: SecurityAuditInput,
-                execution_context: ExecutionContext | None = None,
-            ) -> ToolResult:
-                if not execution_context:
-                    return ToolResult(content=TextContent(text="Error: No context"))
-
-                summary, sub_graph = await self.spawn(
-                    context=execution_context,
-                    system_prompt="You are an expert security auditor...",
-                    user_message=f"Audit the file: {input.file_path}",
-                    tools=[ReadTool()],
-                )
-                return ToolResult(
-                    content=TextContent(text=summary),
-                    sub_graph=sub_graph,
-                )
-
-    The base class provides:
-    - spawn() helper for running sub-agents
-    - Pure functional design (no mutation)
-    """
-
-    async def __call__(
-        self,
-        input: Any,
-        execution_context: ExecutionContext | None = None,
-    ) -> ToolResult:
-        """Execute the sub-agent tool. Override in subclasses.
-
-        Args:
-            input: The typed input dataclass
-            execution_context: Execution context for spawning sub-agents
-
-        Returns:
-            ToolResult containing content and optionally sub_graph
-        """
-        raise NotImplementedError(f"{self.name} does not implement __call__()")
-
-    async def spawn(
-        self,
-        context: ExecutionContext,
-        system_prompt: str,
-        user_message: str,
-        tools: Sequence[Tool] | None = None,
-        tool_name: str | None = None,
-    ) -> tuple[str, SubGraph]:
-        """Spawn a sub-agent and return its summary and graph.
-
-        This is the main helper method that simplifies sub-agent creation.
-
-        Args:
-            context: Execution context (required, provides API access)
-            system_prompt: System prompt for the sub-agent
-            user_message: Initial user message/task for the sub-agent
-            tools: Optional list of tools for the sub-agent
-            tool_name: Name for the sub-agent (defaults to self.name)
-
-        Returns:
-            Tuple of (summary text, SubGraph)
-        """
-        # Import here to avoid circular dependency
-        from ..execution_context import run_sub_agent
-
-        _, sub_graph = await run_sub_agent(
-            context=context,
-            system_prompt=system_prompt,
-            user_message=user_message,
-            tools=tools,
-            tool_name=tool_name or self.name,
-        )
-
-        return sub_graph.summary, sub_graph

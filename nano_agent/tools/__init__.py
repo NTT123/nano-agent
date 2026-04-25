@@ -13,7 +13,6 @@ from .base import (
     InputSchemaDict,
     Question,
     QuestionOption,
-    SubAgentTool,
     Tool,
     ToolDict,
     ToolResult,
@@ -105,7 +104,6 @@ def get_codex_tools() -> list[Tool]:
 __all__ = [
     # Base classes and utilities
     "Tool",
-    "SubAgentTool",
     "ToolDict",
     "ToolResult",
     "InputSchemaDict",

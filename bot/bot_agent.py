@@ -386,6 +386,11 @@ async def channel_worker(
     passes = 0
     max_passes = 8
 
+    # Tools are constant per channel-worker invocation; building them is not
+    # free (PATH lookup in DownloadSkill, tool dataclass construction), so
+    # hoist out of the per-pass loop.
+    tools = state.tools_factory() if state.tools_factory else []
+
     while passes < max_passes:
         queue_before = len(state.get_channel_queue(channel_id))
         if queue_before == 0:
@@ -394,7 +399,6 @@ async def channel_worker(
         user_id = state.channel_last_user_id.get(channel_id)
         cwd = state.working_dirs.get(user_id) if user_id is not None else None
 
-        tools = state.tools_factory() if state.tools_factory else []
         dag = state.get_session(
             channel_id, cwd, system_prompt=system_prompt, tools=tools
         )

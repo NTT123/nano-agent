@@ -60,11 +60,13 @@ from .data_structures import (  # Enums; Content blocks (sum type: ContentBlock)
     render_content_text,
 )
 
-# Execution context and sub-agent support
-from .execution_context import ExecutionContext, run_sub_agent
+# Execution context (the dataclass; sub-agent runner lives in .sub_agent)
+from .execution_context import ExecutionContext
 
 # Executor
 from .executor import run
+
+from .sub_agent import SubAgentTool, run_sub_agent
 
 # API providers (clients, auth, cost tracking)
 from .providers import (
@@ -121,7 +123,6 @@ from .tools import (
     ReadTool,
     StatInput,
     StatTool,
-    SubAgentTool,
     Todo,
     TodoItemInput,
     TodoStatus,

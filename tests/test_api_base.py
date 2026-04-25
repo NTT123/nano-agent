@@ -14,8 +14,11 @@ from nano_agent.providers.base import (
     APIError,
     ContextWindowExceededError,
     approx_token_count,
+    flush_text_parts,
     is_context_window_error_payload,
+    map_responses_status_to_stop_reason,
     parse_tool_arguments,
+    responses_usage_from_dict,
     serialize_tool_arguments,
 )
 
@@ -97,6 +100,78 @@ class TestApproxTokenCount:
 
     def test_byte_per_token_constant(self) -> None:
         assert APPROX_BYTES_PER_TOKEN == 4
+
+
+class TestMapResponsesStatusToStopReason:
+    def test_completed(self) -> None:
+        assert map_responses_status_to_stop_reason("completed") == "end_turn"
+
+    def test_failed(self) -> None:
+        assert map_responses_status_to_stop_reason("failed") == "error"
+
+    def test_incomplete(self) -> None:
+        assert map_responses_status_to_stop_reason("incomplete") == "max_tokens"
+
+    def test_in_progress(self) -> None:
+        assert map_responses_status_to_stop_reason("in_progress") is None
+
+    def test_unknown(self) -> None:
+        assert map_responses_status_to_stop_reason("unknown_status") == "unknown_status"
+
+    def test_empty(self) -> None:
+        assert map_responses_status_to_stop_reason("") is None
+
+
+class TestFlushTextParts:
+    def test_appends_joined_message_and_clears(self) -> None:
+        items: list[dict[str, Any]] = []
+        parts = ["hello", "world"]
+        flush_text_parts(items, "user", "input_text", parts)
+        assert items == [
+            {
+                "role": "user",
+                "content": [{"type": "input_text", "text": "hello\nworld"}],
+            }
+        ]
+        assert parts == []
+
+    def test_noop_when_empty(self) -> None:
+        items: list[dict[str, Any]] = []
+        parts: list[str] = []
+        flush_text_parts(items, "assistant", "output_text", parts)
+        assert items == []
+        assert parts == []
+
+
+class TestResponsesUsageFromDict:
+    def test_extracts_responses_api_fields(self) -> None:
+        usage = responses_usage_from_dict(
+            {
+                "input_tokens": 100,
+                "output_tokens": 50,
+                "total_tokens": 150,
+                "input_tokens_details": {"cached_tokens": 30},
+                "output_tokens_details": {"reasoning_tokens": 20},
+            }
+        )
+        assert usage.input_tokens == 100
+        assert usage.output_tokens == 50
+        assert usage.total_tokens == 150
+        assert usage.cached_tokens == 30
+        assert usage.reasoning_tokens == 20
+        assert usage.cache_creation_input_tokens == 0
+        assert usage.cache_read_input_tokens == 0
+
+    def test_handles_missing_fields(self) -> None:
+        usage = responses_usage_from_dict({})
+        assert usage.input_tokens == 0
+        assert usage.output_tokens == 0
+        assert usage.cached_tokens == 0
+        assert usage.reasoning_tokens == 0
+
+    def test_handles_non_dict(self) -> None:
+        usage = responses_usage_from_dict(None)
+        assert usage.input_tokens == 0
 
 
 class TestAPIError:
