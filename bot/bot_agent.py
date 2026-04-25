@@ -24,6 +24,7 @@ from nano_agent.data_structures import (
     ToolExecution,
     ToolResultContent,
 )
+from nano_agent.executor import maybe_auto_compact
 from nano_agent.providers.base import APIError, APIProtocol
 
 from .bot_state import BotState, serialize_content_blocks, serialize_text_contents
@@ -93,6 +94,10 @@ async def agent_loop(
             # Show typing while waiting for API response
             async with channel.typing():
                 response = None
+                # Retry on transient errors. A mid-stream drop may mean the
+                # server fully processed the turn and only the body was lost,
+                # so retrying can double-bill tokens — accepted tradeoff vs.
+                # killing the channel worker on a flaky connection.
                 for attempt in range(5):
                     try:
                         response = await api.send(dag)
@@ -102,7 +107,7 @@ async def agent_loop(
                             await asyncio.sleep(2**attempt)
                             continue
                         raise
-                    except (httpx.TimeoutException, asyncio.TimeoutError):
+                    except (httpx.TransportError, asyncio.TimeoutError):
                         if attempt < 4:
                             await asyncio.sleep(2**attempt)
                             continue
@@ -287,6 +292,13 @@ async def agent_loop(
             # Merge tool results back into DAG
             merged = Node.with_parents(result_nodes, Message(Role.USER, tool_results))
             dag = dag._with_heads((merged,))
+
+            dag = await maybe_auto_compact(
+                api,
+                dag,
+                last_total_tokens=response.usage.total_tokens,
+                tool_results=tool_results,
+            )
     finally:
         if state.active_run_stats is not None:
             stats.outbound_messages = state.active_run_stats.get("outbound_messages", 0)

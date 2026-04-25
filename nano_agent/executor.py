@@ -3,19 +3,198 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Awaitable, Callable
+import dataclasses
+import json
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable, cast
 
 import httpx
 
 from .cancellation import CancellationToken
-from .dag import DAG
-from .data_structures import ImageContent, Response, TextContent
+from .dag import DAG, Node
+from .data_structures import (
+    ImageContent,
+    Message,
+    Role,
+    StopReason,
+    TextContent,
+    ToolExecution,
+    ToolResultContent,
+    ToolUseContent,
+)
 from .execution_context import ExecutionContext
-from .providers.base import APIError, APIProtocol
+from .providers.base import (
+    APIError,
+    APIProtocol,
+    approx_token_count,
+    responses_tool_result_item,
+)
+from .tools.base import Tool, ToolResult
 
 # Type alias for permission callback
 # Takes (tool_name, tool_input) and returns True if allowed, False if denied
 PermissionCallback = Callable[[str, dict[str, Any]], Awaitable[bool]]
+
+
+@dataclass(frozen=True)
+class _ToolCallOutcome:
+    result_node: Node
+    tool_result: ToolResultContent
+
+
+def _error_tool_outcome(
+    tool_use_head: Node,
+    call: ToolUseContent,
+    message: str,
+) -> _ToolCallOutcome:
+    error_result = TextContent(text=message)
+    result_list: list[TextContent | ImageContent] = [error_result]
+    result_node = tool_use_head.child(
+        ToolExecution(
+            tool_name=call.name,
+            tool_use_id=call.id,
+            result=result_list,
+            is_error=True,
+        )
+    )
+    return _ToolCallOutcome(
+        result_node=result_node,
+        tool_result=ToolResultContent(
+            tool_use_id=call.id,
+            content=result_list,
+            is_error=True,
+        ),
+    )
+
+
+def _successful_tool_outcome(
+    tool_use_head: Node,
+    call: ToolUseContent,
+    tool_result: ToolResult,
+) -> _ToolCallOutcome:
+    result = tool_result.content
+    result_list: list[TextContent | ImageContent] = (
+        list(result) if isinstance(result, list) else [result]
+    )
+
+    parent_node = tool_use_head
+    if tool_result.sub_graph is not None:
+        parent_node = tool_use_head.child(tool_result.sub_graph)
+
+    result_node = parent_node.child(
+        ToolExecution(
+            tool_name=call.name,
+            tool_use_id=call.id,
+            result=result_list,
+        )
+    )
+
+    return _ToolCallOutcome(
+        result_node=result_node,
+        tool_result=ToolResultContent(
+            tool_use_id=call.id,
+            content=result_list,
+        ),
+    )
+
+
+async def _execute_tool_call(
+    *,
+    call: ToolUseContent,
+    tool_map: dict[str, Tool],
+    tool_use_head: Node,
+    turn_context: ExecutionContext,
+) -> _ToolCallOutcome:
+    tool = tool_map.get(call.name)
+    if tool is None:
+        return _error_tool_outcome(tool_use_head, call, f"Unknown tool: {call.name}")
+
+    if call.name == "EditConfirm" and turn_context.permission_callback is not None:
+        permission_input = cast(dict[str, Any], call.input or {})
+        allowed = await turn_context.permission_callback(call.name, permission_input)
+        if not allowed:
+            return _error_tool_outcome(
+                tool_use_head,
+                call,
+                "Permission denied: User rejected the edit operation. "
+                "The file was NOT modified.",
+            )
+
+    try:
+        raw_input = cast(dict[str, Any] | None, call.input)
+        tool_result = await tool.execute(raw_input, execution_context=turn_context)
+    except Exception as e:
+        return _error_tool_outcome(tool_use_head, call, f"Tool error: {e}")
+
+    return _successful_tool_outcome(tool_use_head, call, tool_result)
+
+
+async def _gather_tool_outcomes(
+    tasks: list[asyncio.Task[_ToolCallOutcome]],
+) -> list[_ToolCallOutcome]:
+    # Wrap gather in a coroutine so CancellationToken.run can drive it.
+    return await asyncio.gather(*tasks)
+
+
+async def _cancel_and_drain_tool_tasks(
+    tasks: list[asyncio.Task[_ToolCallOutcome]],
+) -> None:
+    for task in tasks:
+        if not task.done():
+            task.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
+
+
+def _collect_cancelled_tool_outcomes(
+    tool_calls: list[ToolUseContent],
+    tasks: list[asyncio.Task[_ToolCallOutcome]],
+    tool_use_head: Node,
+) -> list[_ToolCallOutcome]:
+    outcomes: list[_ToolCallOutcome] = []
+    for call, task in zip(tool_calls, tasks, strict=True):
+        if task.done() and not task.cancelled() and task.exception() is None:
+            outcomes.append(task.result())
+        else:
+            outcomes.append(
+                _error_tool_outcome(tool_use_head, call, "Operation cancelled by user.")
+            )
+    return outcomes
+
+
+def _estimate_tool_result_tokens(tool_results: list[ToolResultContent]) -> int:
+    # Mirrors codex-rs estimate_response_item_model_visible_bytes: serialize
+    # each Responses-API item and apply 4-bytes/token ceiling division. The
+    # wire wrapper (function_call_output, call_id, quoting) is what the next
+    # API call gets billed for — not just the inner text.
+    total = 0
+    for result in tool_results:
+        wire = responses_tool_result_item(result)
+        total += approx_token_count(json.dumps(wire))
+    return total
+
+
+async def maybe_auto_compact(
+    api: APIProtocol,
+    dag: DAG,
+    last_total_tokens: int,
+    tool_results: list[ToolResultContent],
+) -> DAG:
+    """Compact the DAG mid-turn if projected tokens would cross the API's limit.
+
+    Mirrors codex-rs (session/turn.rs:run_turn): compares
+    ``last_total_tokens + estimated(tool_results)`` against
+    ``api.auto_compact_token_limit``. Skipped when the API client doesn't
+    opt in via ``auto_compact_token_limit`` / ``compact_dag``.
+    """
+    limit = getattr(api, "auto_compact_token_limit", None)
+    compact_dag = getattr(api, "compact_dag", None)
+    if limit is None or compact_dag is None:
+        return dag
+    projected = last_total_tokens + _estimate_tool_result_tokens(tool_results)
+    if projected < limit:
+        return dag
+    compacted = await compact_dag(dag)
+    return cast(DAG, compacted)
 
 
 async def run(
@@ -40,15 +219,6 @@ async def run(
     Returns:
         Final DAG with all messages and tool results
     """
-    from .dag import Node
-    from .data_structures import (
-        Message,
-        Role,
-        StopReason,
-        ToolExecution,
-        ToolResultContent,
-    )
-
     # Get tools from DAG
     tools = dag._tools or ()
     tool_map = {tool.name: tool for tool in tools}
@@ -80,7 +250,10 @@ async def run(
             stop_reason = "cancelled"
             break
 
-        # Retry on transient errors with exponential backoff
+        # Retry on transient errors with exponential backoff. A mid-stream
+        # drop may mean the server fully processed the turn and only the body
+        # was lost, so retrying can double-bill tokens — accepted tradeoff
+        # vs. killing the worker on a flaky connection.
         for attempt in range(5):
             try:
                 # Wrap API call if cancel_token provided
@@ -99,7 +272,7 @@ async def run(
                     await asyncio.sleep(2**attempt)  # Exponential backoff
                     continue
                 raise
-            except (httpx.TimeoutException, asyncio.TimeoutError):
+            except (httpx.TransportError, asyncio.TimeoutError):
                 if attempt < 4:
                     await asyncio.sleep(2**attempt)
                     continue
@@ -132,193 +305,59 @@ async def run(
         # Save current head before branching
         tool_use_head = dag.head
 
-        # Execute tools and create branch nodes for visualization
-        result_nodes = []
-        tool_results = []
+        # All concurrent tasks share the same turn-start context.
+        turn_context = dataclasses.replace(
+            execution_context,
+            api=api,
+            dag=dag,
+            cancel_token=cancel_token,
+            permission_callback=permission_callback,
+        )
+
+        # asyncio.gather preserves order, so outcomes align with tool_calls.
+        tasks = [
+            asyncio.create_task(
+                _execute_tool_call(
+                    call=call,
+                    tool_map=tool_map,
+                    tool_use_head=tool_use_head,
+                    turn_context=turn_context,
+                )
+            )
+            for call in tool_calls
+        ]
 
         cancelled = False
-        cancelled_at_index: int | None = None
-        for i, call in enumerate(tool_calls):
-            # Check for cancellation before each tool
-            if cancel_token and cancel_token.is_cancelled:
-                cancelled_at_index = i  # Tool hasn't started yet
-                cancelled = True
-                break
-
-            tool = tool_map.get(call.name)
-            if tool is None:
-                error_result = TextContent(text=f"Unknown tool: {call.name}")
-                result_node = tool_use_head.child(
-                    ToolExecution(
-                        tool_name=call.name,
-                        tool_use_id=call.id,
-                        result=[error_result],
-                        is_error=True,
-                    )
-                )
-                result_nodes.append(result_node)
-                tool_results.append(
-                    ToolResultContent(
-                        tool_use_id=call.id,
-                        content=[error_result],
-                        is_error=True,
-                    )
-                )
-                continue
-
-            # Check permission for EditConfirm
-            if call.name == "EditConfirm" and permission_callback is not None:
-                allowed = await permission_callback(call.name, call.input or {})
-                if not allowed:
-                    denied_result = TextContent(
-                        text="Permission denied: User rejected the edit operation. "
-                        "The file was NOT modified."
-                    )
-                    denied_result_list: list[TextContent | ImageContent] = [
-                        denied_result
-                    ]
-                    result_node = tool_use_head.child(
-                        ToolExecution(
-                            tool_name=call.name,
-                            tool_use_id=call.id,
-                            result=denied_result_list,
-                            is_error=True,
-                        )
-                    )
-                    result_nodes.append(result_node)
-                    tool_results.append(
-                        ToolResultContent(
-                            tool_use_id=call.id,
-                            content=denied_result_list,
-                            is_error=True,
-                        )
-                    )
-                    continue  # Skip actual execution
-
-            # Create current execution context for this call
-            # (DAG is updated as we process, so context needs fresh reference)
-            current_context = ExecutionContext(
-                api=api,
-                dag=dag,
-                cancel_token=cancel_token,
-                permission_callback=permission_callback,
-                depth=execution_context.depth,
-                max_depth=execution_context.max_depth,
+        try:
+            if cancel_token:
+                outcomes = await cancel_token.run(_gather_tool_outcomes(tasks))
+            else:
+                outcomes = await _gather_tool_outcomes(tasks)
+        except asyncio.CancelledError:
+            await _cancel_and_drain_tool_tasks(tasks)
+            outcomes = _collect_cancelled_tool_outcomes(
+                tool_calls, tasks, tool_use_head
             )
+            cancelled = True
 
-            # Use execute() to convert dict input to typed dataclass
-            try:
-                if cancel_token:
-                    tool_result = await cancel_token.run(
-                        tool.execute(call.input, execution_context=current_context)
-                    )
-                else:
-                    tool_result = await tool.execute(
-                        call.input, execution_context=current_context
-                    )
-            except asyncio.CancelledError:
-                cancelled_at_index = i  # Tool was running when cancelled
-                cancelled = True
-                break
-            except Exception as e:
-                error_result = TextContent(text=f"Tool error: {e}")
-                result_node = tool_use_head.child(
-                    ToolExecution(
-                        tool_name=call.name,
-                        tool_use_id=call.id,
-                        result=[error_result],
-                        is_error=True,
-                    )
-                )
-                result_nodes.append(result_node)
-                tool_results.append(
-                    ToolResultContent(
-                        tool_use_id=call.id,
-                        content=[error_result],
-                        is_error=True,
-                    )
-                )
-                continue
-
-            result = tool_result.content
-            result_list: list[TextContent | ImageContent] = (
-                list(result) if isinstance(result, list) else [result]
-            )
-
-            # Check if tool returned a SubGraph (sub-agent execution)
-            # SubGraph runs first, then produces the ToolExecution result
-            sub_graph_node = None
-            if tool_result.sub_graph is not None:
-                # SubGraph is first (sub-agent runs)
-                sub_graph_node = tool_use_head.child(tool_result.sub_graph)
-
-            # Create ToolExecution node (the result)
-            # If sub-agent ran, ToolExecution is child of SubGraph
-            # Otherwise, ToolExecution is child of tool_use_head
-            parent_node = sub_graph_node if sub_graph_node else tool_use_head
-            result_node = parent_node.child(
-                ToolExecution(
-                    tool_name=call.name,
-                    tool_use_id=call.id,
-                    result=result_list,
-                )
-            )
-
-            result_nodes.append(result_node)
-
-            # Collect tool results for API
-            tool_results.append(
-                ToolResultContent(
-                    tool_use_id=call.id,
-                    content=result_list,
-                )
-            )
-
-        # If cancelled during tool execution, add results for cancelled/pending tools
-        if cancelled:
-            assert cancelled_at_index is not None
-            for j in range(cancelled_at_index, len(tool_calls)):
-                pending_call = tool_calls[j]
-                if j == cancelled_at_index:
-                    msg = "Operation cancelled by user."
-                else:
-                    msg = "Tool skipped due to cancellation."
-
-                cancelled_result = TextContent(text=msg)
-                result_node = tool_use_head.child(
-                    ToolExecution(
-                        tool_name=pending_call.name,
-                        tool_use_id=pending_call.id,
-                        result=[cancelled_result],
-                        is_error=True,
-                    )
-                )
-                result_nodes.append(result_node)
-                tool_results.append(
-                    ToolResultContent(
-                        tool_use_id=pending_call.id,
-                        content=[cancelled_result],
-                        is_error=True,
-                    )
-                )
-
-            # Merge all results (completed + cancelled + skipped)
-            if result_nodes:
-                merged = Node.with_parents(
-                    result_nodes,
-                    Message(Role.USER, tool_results),
-                )
-                dag = dag._with_heads((merged,))
-
-            stop_reason = "cancelled"
-            break
-
-        # Merge all branches with combined results
+        result_nodes = [outcome.result_node for outcome in outcomes]
+        tool_results = [outcome.tool_result for outcome in outcomes]
         merged = Node.with_parents(
             result_nodes,
             Message(Role.USER, tool_results),
         )
         dag = dag._with_heads((merged,))
+
+        if cancelled:
+            stop_reason = "cancelled"
+            break
+
+        dag = await maybe_auto_compact(
+            api,
+            dag,
+            last_total_tokens=response.usage.total_tokens,
+            tool_results=tool_results,
+        )
 
     # Add stop reason node
     dag = dag._with_heads(
